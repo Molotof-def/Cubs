@@ -5,7 +5,7 @@ import random
 from datetime import datetime, timedelta
 from typing import Dict
 
-import aiosqlite
+import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command, CommandObject
@@ -29,16 +29,21 @@ if not OWNER_ID_RAW:
     exit("❌ ОШИБКА: OWNER_ID не найден в переменных окружения!")
 OWNER_ID = int(OWNER_ID_RAW)
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL в Render.")
+
+# Обязательный канал для подписки
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@твой_канал")
+
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
-DB_FILE = "dice_game_server.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище активных дуэлей
 active_duels: Dict[str, dict] = {}
 
 
@@ -47,140 +52,159 @@ def get_mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-# ================= БАЗА ДАННЫХ (AIOSQLITE) =================
+async def check_subscription(user_id: int) -> bool:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@твой_канал":
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        logging.error(f"Ошибка проверки подписки: {e}")
+        return True
+
+
+def sub_keyboard():
+    builder = InlineKeyboardBuilder()
+    channel_url = f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}"
+    builder.button(text="📢 Подписаться на канал", url=channel_url)
+    return builder.as_markup()
+
+
+# ================= БАЗА ДАННЫХ (POSTGRESQL / ASYNCPG) =================
 class Database:
-    def __init__(self, db_file: str):
-        self.db_file = db_file
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+        self.pool = None
 
     async def init(self):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("""
+        # asyncpg требует схему postgresql:// вместо устаревшей postgres://
+        clean_url = self.db_url.replace("postgres://", "postgresql://", 1)
+        self.pool = await asyncpg.create_pool(dsn=clean_url)
+
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
+                    user_id BIGINT PRIMARY KEY,
                     username TEXT,
-                    balance INTEGER DEFAULT 100,
-                    turnover INTEGER DEFAULT 0,
-                    wins INTEGER DEFAULT 0,
-                    losses INTEGER DEFAULT 0,
-                    draws INTEGER DEFAULT 0,
-                    warns INTEGER DEFAULT 0
-                )
-            """)
-            await db.execute("""
+                    tg_username TEXT,
+                    balance BIGINT DEFAULT 100,
+                    turnover BIGINT DEFAULT 0,
+                    wins INT DEFAULT 0,
+                    losses INT DEFAULT 0,
+                    draws INT DEFAULT 0,
+                    warns INT DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS bot_admins (
-                    user_id INTEGER PRIMARY KEY
-                )
-            """)
-            await db.execute("""
+                    user_id BIGINT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS promo_codes (
                     code TEXT PRIMARY KEY,
-                    reward INTEGER,
-                    uses_left INTEGER
-                )
-            """)
-            await db.execute("""
+                    reward INT,
+                    uses_left INT
+                );
                 CREATE TABLE IF NOT EXISTS promo_history (
-                    user_id INTEGER,
+                    user_id BIGINT,
                     code TEXT,
                     PRIMARY KEY (user_id, code)
-                )
+                );
             """)
-            await db.commit()
 
-    async def register_user(self, user_id: int, username: str):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("""
-                INSERT INTO users (user_id, username) VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET username=excluded.username
-            """, (user_id, username))
-            await db.commit()
+    async def register_user(self, user_id: int, username: str, tg_username: str = None):
+        clean_tag = tg_username.lower() if tg_username else None
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (user_id, username, tg_username) 
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                    tg_username = EXCLUDED.tg_username
+            """, user_id, username, clean_tag)
+
+    async def get_user_id_by_username(self, tg_username: str):
+        clean_tag = tg_username.replace("@", "").lower().strip()
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("SELECT user_id FROM users WHERE tg_username = $1", clean_tag)
 
     async def get_user(self, user_id: int):
-        async with aiosqlite.connect(self.db_file) as db:
-            async with db.execute(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns FROM users WHERE user_id = ?",
-                (user_id,)
-            ) as cursor:
-                return await cursor.fetchone()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns FROM users WHERE user_id = $1",
+                user_id
+            )
+            return list(row) if row else None
 
     async def change_balance(self, user_id: int, amount: int):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-            await db.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
     async def add_turnover(self, user_id: int, amount: int):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("UPDATE users SET turnover = turnover + ? WHERE user_id = ?", (abs(amount), user_id))
-            await db.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET turnover = turnover + $1 WHERE user_id = $2", abs(amount), user_id)
+
     async def record_game(self, user_id: int, status: str):
         col = "wins" if status == "win" else ("losses" if status == "loss" else "draws")
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute(f"UPDATE users SET {col} = {col} + 1 WHERE user_id = ?", (user_id,))
-            await db.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"UPDATE users SET {col} = {col} + 1 WHERE user_id = $1", user_id)
 
     async def get_top(self, order_by="balance", limit=10):
-        async with aiosqlite.connect(self.db_file) as db:
-            async with db.execute(f"SELECT username, {order_by} FROM users ORDER BY {order_by} DESC LIMIT ?", (limit,)) as cursor:
-                return await cursor.fetchall()
+        # Валидация колонки для предотвращения SQL-инъекций
+        order_col = "turnover" if order_by == "turnover" else "balance"
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(f"SELECT username, {order_col} FROM users ORDER BY {order_col} DESC LIMIT $1", limit)
 
     async def is_admin(self, user_id: int) -> bool:
         if user_id == OWNER_ID:
             return True
-        async with aiosqlite.connect(self.db_file) as db:
-            async with db.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,)) as cursor:
-                return (await cursor.fetchone()) is not None
+        async with self.pool.acquire() as conn:
+            res = await conn.fetchval("SELECT 1 FROM bot_admins WHERE user_id = $1", user_id)
+            return res is not None
 
     async def add_admin(self, user_id: int):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("INSERT OR IGNORE INTO bot_admins (user_id) VALUES (?)", (user_id,))
-            await db.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
 
     async def add_warn(self, user_id: int) -> int:
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("UPDATE users SET warns = warns + 1 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            async with db.execute("SELECT warns FROM users WHERE user_id = ?", (user_id,)) as cursor:
-                res = await cursor.fetchone()
-                return res[0] if res else 1
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET warns = warns + 1 WHERE user_id = $1", user_id)
+            res = await conn.fetchval("SELECT warns FROM users WHERE user_id = $1", user_id)
+            return res if res is not None else 1
 
     async def reset_warns(self, user_id: int):
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute("UPDATE users SET warns = 0 WHERE user_id = ?", (user_id,))
-            await db.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET warns = 0 WHERE user_id = $1", user_id)
 
     async def create_promo(self, code: str, reward: int, uses: int) -> bool:
-        async with aiosqlite.connect(self.db_file) as db:
+        async with self.pool.acquire() as conn:
             try:
-                await db.execute("INSERT INTO promo_codes VALUES (?, ?, ?)", (code.upper(), reward, uses))
-                await db.commit()
+                await conn.execute("INSERT INTO promo_codes (code, reward, uses_left) VALUES ($1, $2, $3)", code.upper(), reward, uses)
                 return True
             except:
                 return False
 
     async def activate_promo(self, user_id: int, code: str) -> tuple[bool, str]:
         code = code.upper()
-        async with aiosqlite.connect(self.db_file) as db:
-            async with db.execute("SELECT 1 FROM promo_history WHERE user_id = ? AND code = ?", (user_id, code)) as c1:
-                if await c1.fetchone():
-                    return False, "❌ Вы уже активировали этот промокод!"
+        async with self.pool.acquire() as conn:
+            used = await conn.fetchval("SELECT 1 FROM promo_history WHERE user_id = $1 AND code = $2", user_id, code)
+            if used:
+                return False, "❌ Вы уже активировали этот промокод!"
 
-            async with db.execute("SELECT reward, uses_left FROM promo_codes WHERE code = ?", (code,)) as c2:
-                row = await c2.fetchone()
-                if not row:
-                    return False, "❌ Промокод не найден!"
+            promo = await conn.fetchrow("SELECT reward, uses_left FROM promo_codes WHERE code = $1", code)
+            if not promo:
+                return False, "❌ Промокод не найден!"
 
-            reward, uses_left = row
+            reward, uses_left = promo["reward"], promo["uses_left"]
             if uses_left <= 0:
                 return False, "❌ У этого промокода закончились активации!"
 
-            await db.execute("UPDATE promo_codes SET uses_left = uses_left - 1 WHERE code = ?", (code,))
-            await db.execute("INSERT INTO promo_history VALUES (?, ?)", (user_id, code))
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (reward, user_id))
-            await db.commit()
+            async with conn.transaction():
+                await conn.execute("UPDATE promo_codes SET uses_left = uses_left - 1 WHERE code = $1", code)
+                await conn.execute("INSERT INTO promo_history (user_id, code) VALUES ($1, $2)", user_id, code)
+                await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
+
             return True, f"🎉 Промокод активирован! Получено: <b>+{reward} 💰</b>"
 
 
-db = Database(DB_FILE)
+db = Database(DATABASE_URL)
 
 
 # ================= КЛАВИАТУРЫ =================
@@ -195,7 +219,7 @@ def duel_keyboard(duel_id: str):
 # ================= ОСНОВНЫЕ КОМАНДЫ =================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await db.register_user(message.from_user.id, message.from_user.full_name)
+    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     user = await db.get_user(message.from_user.id)
 
     text = (
@@ -203,14 +227,14 @@ async def cmd_start(message: Message):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Твой баланс: <b>{user[2]} монет</b>\n\n"
         f"📜 <b>Игровые команды:</b>\n"
-        f"⚔️ <code>/duel [ставка]</code> (ответом) — вызвать игрока на кубиках (1 vs 1)\n"
+        f"⚔️ <code>/duel [ставка]</code> (ответом) — дуэль 1 vs 1\n"
         f"🎲 <code>/dice [ставка]</code> — бросить кубик против бота\n"
-        f"🎲🎲 <code>/doubledice [ставка]</code> — бросок 2 кубиков (x3 за дубль!)\n\n"
+        f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (x3 за дубль!)\n\n"
         f"💳 <b>Финансы и Профиль:</b>\n"
-        f"⭐ <code>/stars [кол-во]</code> — купить монеты за Telegram Stars\n"
-        f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты игроку\n"
-        f"👤 <code>/profile</code> — личный профиль и статистика\n"
-        f"🏆 <code>/top</code> — список богатейших игроков\n"
+        f"⭐ <code>/stars [кол-во]</code> — купить монеты за Stars\n"
+        f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
+        f"👤 <code>/profile</code> — профиль и статистика\n"
+        f"🏆 <code>/top</code> — богатейшие игроки\n"
         f"🎟 <code>/promo [код]</code> — активировать промокод"
     )
     await message.answer(text, parse_mode="HTML")
@@ -219,7 +243,7 @@ async def cmd_start(message: Message):
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name)
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
     user = await db.get_user(user_id)
 
     _, name, balance, turnover, wins, losses, draws, warns = user
@@ -257,8 +281,8 @@ async def cmd_pay(message: Message, command: CommandObject):
     if amount <= 0:
         return await message.answer("❌ Сумма перевода должна быть больше 0!")
 
-    await db.register_user(sender.id, sender.full_name)
-    await db.register_user(recipient.id, recipient.full_name)
+    await db.register_user(sender.id, sender.full_name, sender.username)
+    await db.register_user(recipient.id, recipient.full_name, recipient.username)
 
     sender_data = await db.get_user(sender.id)
     if sender_data[2] < amount:
@@ -274,7 +298,7 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
-# ================= ПОКУПКА ЗА TELEGRAM STARS =================
+# ================= ОПЛАТА ЧЕРЕЗ TELEGRAM STARS =================
 @dp.message(Command("stars"))
 @dp.message(Command("donate"))
 async def cmd_stars(message: Message, command: CommandObject):
@@ -306,7 +330,7 @@ async def process_successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     if payload.startswith("stars_deposit_"):
         coins = int(payload.replace("stars_deposit_", ""))
-        await db.register_user(message.from_user.id, message.from_user.full_name)
+        await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         await db.change_balance(message.from_user.id, coins)
 
         await message.answer(
@@ -317,11 +341,14 @@ async def process_successful_payment(message: Message):
         )
 
 
-# ================= ОДИНОЧНЫЙ КУБИК (/dice) (1.95x) =================
+# ================= ОДИНОЧНЫЙ КУБИК (/dice) (x1.95) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name)
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     bet = 15
     if command.args and command.args.isdigit():
@@ -348,7 +375,7 @@ async def cmd_dice(message: Message, command: CommandObject):
     await asyncio.sleep(4.0)
 
     if p_val > b_val:
-        win = int(bet * 1.95)  # Комиссия 5%
+        win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
         text = (
@@ -363,7 +390,7 @@ async def cmd_dice(message: Message, command: CommandObject):
             f"📉 Потеряно: <b>-{bet} 💰</b>"
         )
     else:
-        await db.change_balance(user_id, bet)  # 100% возврат
+        await db.change_balance(user_id, bet)
         await db.record_game(user_id, "draw")
         text = (
             f"╔════════════════════╗\n"
@@ -377,11 +404,14 @@ async def cmd_dice(message: Message, command: CommandObject):
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= РЕЖИМ 2 КУБИКА (/doubledice) (1.95x / 3x) =================
+# ================= РЕЖИМ 2 КУБИКА (/doubledice) =================
 @dp.message(Command("doubledice"))
 async def cmd_double_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name)
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     bet = 20
     if command.args and command.args.isdigit():
@@ -446,9 +476,12 @@ async def cmd_double_dice(message: Message, command: CommandObject):
     await message.answer(res, parse_mode="HTML")
 
 
-# ================= PVP ДУЭЛИ МЕЖДУ ИГРОКАМИ (/duel) (1.95x) =================
+# ================= PVP ДУЭЛИ (/duel) =================
 @dp.message(Command("duel"))
 async def cmd_duel(message: Message, command: CommandObject):
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
         return await message.answer("❌ Ответьте этой командой на сообщение оппонента!")
 
@@ -465,8 +498,8 @@ async def cmd_duel(message: Message, command: CommandObject):
     if bet <= 0:
         return await message.answer("❌ Ставка должна быть больше 0!")
 
-    await db.register_user(challenger.id, challenger.full_name)
-    await db.register_user(opponent.id, opponent.full_name)
+    await db.register_user(challenger.id, challenger.full_name, challenger.username)
+    await db.register_user(opponent.id, opponent.full_name, opponent.username)
 
     c_data = await db.get_user(challenger.id)
     o_data = await db.get_user(opponent.id)
@@ -492,7 +525,7 @@ async def cmd_duel(message: Message, command: CommandObject):
         f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
         f"🔴 Вызывающий: {get_mention(challenger.id, challenger.full_name)}\n"
         f"🔵 Оппонент: {get_mention(opponent.id, opponent.full_name)}\n"
-        f"💰 Ставка: <b>{bet} 💰</b> (Чистый приз победителя: <b>+{int(bet * 1.95)} 💰</b>)\n\n"
+        f"💰 Ставка: <b>{bet} 💰</b> (Приз: <b>+{int(bet * 1.95)} 💰</b>)\n\n"
         f"<i>У оппонента есть 60 секунд на принятие.</i>"
     )
 
@@ -517,6 +550,9 @@ async def cb_accept_duel(call: CallbackQuery):
     if call.from_user.id != duel["opponent_id"]:
         return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
 
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Вы должны подписаться на канал спонсора, чтобы принять вызов!", show_alert=True)
+
     if duel["status"] != "pending":
         return await call.answer("Дуэль уже началась!", show_alert=True)
 
@@ -536,7 +572,7 @@ async def cb_accept_duel(call: CallbackQuery):
     await db.add_turnover(c_id, bet)
     await db.add_turnover(o_id, bet)
 
-    await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка каждого: <b>{bet} 💰</b>", parse_mode="HTML")
+    await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{bet} 💰</b>", parse_mode="HTML")
 
     await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
     c_dice = await call.message.answer_dice(emoji="🎲")
@@ -548,7 +584,6 @@ async def cb_accept_duel(call: CallbackQuery):
     o_val = o_dice.dice.value
     await asyncio.sleep(4.0)
 
-    # Приз с комиссией 5% (1.95x от ставки)
     win_sum = int(bet * 1.95)
 
     if c_val > o_val:
@@ -612,11 +647,14 @@ async def cmd_top(message: Message):
 
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     text = "🏆 <b>ТОП-10 БОГАЧЕЙ БОТА:</b>\n\n"
-    for i, (name, val) in enumerate(top, 1):
+    for i, row in enumerate(top, 1):
         place = medals.get(i, f"<b>{i}.</b>")
+        name = row["username"]
+        val = row["balance"]
         safe_name = name.replace("<", "&lt;").replace(">", "&gt;") if name else "Аноним"
         text += f"{place} {safe_name} — <code>{val} 💰</code>\n"
-        await message.answer(text, parse_mode="HTML")
+
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("add_promo"))
@@ -643,7 +681,7 @@ async def cmd_promo(message: Message, command: CommandObject):
     if not command.args:
         return await message.answer("Формат: <code>/promo [КОД]</code>", parse_mode="HTML")
 
-    await db.register_user(message.from_user.id, message.from_user.full_name)
+    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     _, msg = await db.activate_promo(message.from_user.id, command.args.strip())
     await message.answer(msg, parse_mode="HTML")
 
@@ -664,10 +702,8 @@ async def cmd_give(message: Message, command: CommandObject):
         return await message.answer("❌ Сумма должна быть числом!")
 
     target = message.reply_to_message.from_user
-    await db.register_user(target.id, target.full_name)
-    await db.change_balance(target.id, amount)
-
-    verb = "выдал" if amount >= 0 else "забрал"
+    await db.register_user(target.id, target.full_name, target.username)
+    await db.change_balance(target.id, amount)verb = "выдал" if amount >= 0 else "забрал"
     await message.answer(f"👑 Администратор {verb} <b>{abs(amount)} 💰</b> у {get_mention(target.id, target.full_name)}!", parse_mode="HTML")
 
 
@@ -765,16 +801,25 @@ async def cmd_ban(message: Message):
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message, command: CommandObject):
-    if not await db.is_admin(message.from_user.id) or not command.args:
-        return await message.answer("Использование: <code>/unban [USER_ID]</code>", parse_mode="HTML")
+    if not await db.is_admin(message.from_user.id):
+        return
 
-    if not command.args.isdigit():
-        return await message.answer("❌ ID пользователя должен состоять из цифр!")
+    if not command.args:
+        return await message.answer("Использование: <code>/unban @username</code> или <code>/unban 12345678</code>", parse_mode="HTML")
 
-    user_id = int(command.args)
+    arg = command.args.strip()
+    target_id = None
+
+    if arg.isdigit():
+        target_id = int(arg)
+    else:
+        target_id = await db.get_user_id_by_username(arg)
+        if not target_id:
+            return await message.answer("❌ Пользователь с таким @username не найден в базе данных бота!")
+
     try:
-        await message.chat.unban(user_id=user_id, only_if_banned=True)
-        await message.answer(f"✅ Пользователь с ID <code>{user_id}</code> разбанен в чате.", parse_mode="HTML")
+        await message.chat.unban(user_id=target_id, only_if_banned=True)
+        await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Ошибка разбана: {e}")
 
@@ -788,7 +833,7 @@ async def cmd_warn(message: Message):
     if target.id == OWNER_ID or await db.is_admin(target.id):
         return await message.answer("❌ Нельзя выдать варн администратору!")
 
-    await db.register_user(target.id, target.full_name)
+    await db.register_user(target.id, target.full_name, target.username)
     warns = await db.add_warn(target.id)
 
     if warns >= 3:
@@ -840,5 +885,5 @@ def main():
         asyncio.run(run_polling())
 
 
-if __name__ == "__main__":
+if __name__== "__main__":
     main()
