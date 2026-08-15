@@ -703,7 +703,8 @@ async def cmd_give(message: Message, command: CommandObject):
 
     target = message.reply_to_message.from_user
     await db.register_user(target.id, target.full_name, target.username)
-    await db.change_balance(target.id, amount)verb = "выдал" if amount >= 0 else "забрал"
+    await db.change_balance(target.id, amount)
+    verb = "выдал" if amount >= 0 else "забрал"
     await message.answer(f"👑 Администратор {verb} <b>{abs(amount)} 💰</b> у {get_mention(target.id, target.full_name)}!", parse_mode="HTML")
 
 
