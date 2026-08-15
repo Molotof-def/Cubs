@@ -12,32 +12,33 @@ from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message,
     CallbackQuery,
-    ChatPermissions
+    ChatPermissions,
+    PreCheckoutQuery,
+    LabeledPrice
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# ================= НАСТРОЙКИ СЕРВЕРА (БЕЗОПАСНЫЕ) =================
-# Бот берет данные ТОЛЬКО из переменных окружения сервера
+# ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    exit("❌ ОШИБКА: Токен бота не найден! Добавьте BOT_TOKEN в Environment Variables на Render.")
+    exit("❌ ОШИБКА: Токен бота не найден в переменных окружения (BOT_TOKEN)!")
 
-OWNER_ID_STR = os.getenv("OWNER_ID")
-if not OWNER_ID_STR:
-    exit("❌ ОШИБКА: Ваш ID не найден! Добавьте OWNER_ID в Environment Variables на Render.")
-OWNER_ID = int(OWNER_ID_STR)
+OWNER_ID_RAW = os.getenv("OWNER_ID")
+if not OWNER_ID_RAW:
+    exit("❌ ОШИБКА: OWNER_ID не найден в переменных окружения!")
+OWNER_ID = int(OWNER_ID_RAW)
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render подставляет сам
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
-DB_FILE = "dice_server.db"
+DB_FILE = "dice_game_server.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Активные вызовы дуэлей: {duel_id: {...}}
+# Хранилище активных дуэлей
 active_duels: Dict[str, dict] = {}
 
 
@@ -62,7 +63,6 @@ class Database:
                     wins INTEGER DEFAULT 0,
                     losses INTEGER DEFAULT 0,
                     draws INTEGER DEFAULT 0,
-                    last_bonus TEXT DEFAULT NULL,
                     warns INTEGER DEFAULT 0
                 )
             """)
@@ -98,7 +98,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with aiosqlite.connect(self.db_file) as db:
             async with db.execute(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, last_bonus, warns FROM users WHERE user_id = ?",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns FROM users WHERE user_id = ?",
                 (user_id,)
             ) as cursor:
                 return await cursor.fetchone()
@@ -112,37 +112,11 @@ class Database:
         async with aiosqlite.connect(self.db_file) as db:
             await db.execute("UPDATE users SET turnover = turnover + ? WHERE user_id = ?", (abs(amount), user_id))
             await db.commit()
-
     async def record_game(self, user_id: int, status: str):
         col = "wins" if status == "win" else ("losses" if status == "loss" else "draws")
         async with aiosqlite.connect(self.db_file) as db:
             await db.execute(f"UPDATE users SET {col} = {col} + 1 WHERE user_id = ?", (user_id,))
             await db.commit()
-
-    async def claim_daily_bonus(self, user_id: int) -> tuple[bool, int, str]:
-        user = await self.get_user(user_id)
-        if not user:
-            return False, 0, "Сначала напишите /start"
-
-        last_bonus_str = user[7]
-        now = datetime.now()
-
-        if last_bonus_str:
-            last_bonus = datetime.fromisoformat(last_bonus_str)
-            if now - last_bonus < timedelta(hours=24):
-                remaining = timedelta(hours=24) - (now - last_bonus)
-                hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-                minutes, _ = divmod(remainder, 60)
-                return False, 0, f"⏳ Бонус уже получен! Приходи через <b>{hours}ч {minutes}м</b>."
-
-        bonus = random.randint(25, 100)
-        async with aiosqlite.connect(self.db_file) as db:
-            await db.execute(
-                "UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?",
-                (bonus, now.isoformat(), user_id)
-            )
-            await db.commit()
-        return True, bonus, f"🎁 Ты забрал ежедневный бонус: <b>+{bonus} 💰</b>!"
 
     async def get_top(self, order_by="balance", limit=10):
         async with aiosqlite.connect(self.db_file) as db:
@@ -209,10 +183,10 @@ class Database:
 db = Database(DB_FILE)
 
 
-# ================= КЛАВИАТУРА ДУЭЛИ =================
+# ================= КЛАВИАТУРЫ =================
 def duel_keyboard(duel_id: str):
     builder = InlineKeyboardBuilder()
-    builder.button(text="⚔️ Принять дуэль", callback_data=f"accept_{duel_id}")
+    builder.button(text="⚔️ Принять вызов", callback_data=f"accept_{duel_id}")
     builder.button(text="❌ Отклонить", callback_data=f"decline_{duel_id}")
     builder.adjust(2)
     return builder.as_markup()
@@ -225,16 +199,18 @@ async def cmd_start(message: Message):
     user = await db.get_user(message.from_user.id)
 
     text = (
-        f"🎲 <b>Добро пожаловать в Бот Кубиков!</b>\n\n"
+        f"🎲 <b>Добро пожаловать в Dice Club!</b>\n\n"
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
-        f"💰 Баланс: <b>{user[2]} монет</b>\n\n"
-        f"📜 <b>Команды:</b>\n"
-        f"⚔️ <code>/duel [ставка]</code> (ответом на сообщение) — бросить вызов игроку\n"
-        f"🤖 <code>/dice [ставка]</code> — бросить кубик против бота\n"
-        f"🎁 <code>/bonus</code> — ежедневный бонус монет\n"
-        f"👤 <code>/profile</code> — твоя статистика\n"
-        f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты другу\n"
-        f"🏆 <code>/top</code> — таблица лидеров\n"
+        f"💰 Твой баланс: <b>{user[2]} монет</b>\n\n"
+        f"📜 <b>Игровые команды:</b>\n"
+        f"⚔️ <code>/duel [ставка]</code> (ответом) — вызвать игрока на кубиках (1 vs 1)\n"
+        f"🎲 <code>/dice [ставка]</code> — бросить кубик против бота\n"
+        f"🎲🎲 <code>/doubledice [ставка]</code> — бросок 2 кубиков (x3 за дубль!)\n\n"
+        f"💳 <b>Финансы и Профиль:</b>\n"
+        f"⭐ <code>/stars [кол-во]</code> — купить монеты за Telegram Stars\n"
+        f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты игроку\n"
+        f"👤 <code>/profile</code> — личный профиль и статистика\n"
+        f"🏆 <code>/top</code> — список богатейших игроков\n"
         f"🎟 <code>/promo [код]</code> — активировать промокод"
     )
     await message.answer(text, parse_mode="HTML")
@@ -246,7 +222,7 @@ async def cmd_profile(message: Message):
     await db.register_user(user_id, message.from_user.full_name)
     user = await db.get_user(user_id)
 
-    _, name, balance, turnover, wins, losses, draws, _, warns = user
+    _, name, balance, turnover, wins, losses, draws, warns = user
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
 
@@ -256,24 +232,17 @@ async def cmd_profile(message: Message):
         f"┣ 💰 <b>Баланс:</b> <code>{balance} 💰</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{turnover} 💰</code>\n"
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
-        f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | ❌ <b>Поражений:</b> <code>{losses}</code> | 🤝 <b>Ничьих:</b> <code>{draws}</code>\n"
+        f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
         f"┣ 📈 <b>Винрейт:</b> <code>{winrate}%</code>\n"
         f"┗ ⚠️ <b>Варны:</b> <code>{warns}/3</code>"
     )
     await message.answer(text, parse_mode="HTML")
 
 
-@dp.message(Command("bonus"))
-async def cmd_bonus(message: Message):
-    await db.register_user(message.from_user.id, message.from_user.full_name)
-    _, _, msg = await db.claim_daily_bonus(message.from_user.id)
-    await message.answer(msg, parse_mode="HTML")
-
-
 @dp.message(Command("pay"))
 async def cmd_pay(message: Message, command: CommandObject):
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Используйте команду в ответ на сообщение игрока!")
+        return await message.answer("❌ Ответьте этой командой на сообщение игрока!")
 
     recipient = message.reply_to_message.from_user
     sender = message.from_user
@@ -305,7 +274,50 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
-# ================= КУБИК ПРОТИВ БОТА (/dice) =================
+# ================= ПОКУПКА ЗА TELEGRAM STARS =================
+@dp.message(Command("stars"))
+@dp.message(Command("donate"))
+async def cmd_stars(message: Message, command: CommandObject):
+    stars_amount = 15
+    if command.args and command.args.isdigit():
+        stars_amount = int(command.args)
+
+    coins_to_get = stars_amount * 10
+    prices = [LabeledPrice(label=f"Пакет: {coins_to_get} монет", amount=stars_amount)]
+
+    await bot.send_invoice(
+        chat_id=message.chat.id,
+        title="⭐ Покупка монет",
+        description=f"Приобретение {coins_to_get} игровых монет за {stars_amount} Telegram Stars.",
+        payload=f"stars_deposit_{coins_to_get}",
+        currency="XTR",
+        prices=prices,
+        start_parameter="stars-buy-coins"
+    )
+
+
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    payload = message.successful_payment.invoice_payload
+    if payload.startswith("stars_deposit_"):
+        coins = int(payload.replace("stars_deposit_", ""))
+        await db.register_user(message.from_user.id, message.from_user.full_name)
+        await db.change_balance(message.from_user.id, coins)
+
+        await message.answer(
+            f"🎉 <b>Оплата прошла успешно!</b>\n\n"
+            f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
+            f"💰 Зачислено: <b>+{coins} монет</b>",
+            parse_mode="HTML"
+        )
+
+
+# ================= ОДИНОЧНЫЙ КУБИК (/dice) (1.95x) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -336,22 +348,105 @@ async def cmd_dice(message: Message, command: CommandObject):
     await asyncio.sleep(4.0)
 
     if p_val > b_val:
-        win = bet * 2
+        win = int(bet * 1.95)  # Комиссия 5%
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        text = f"🎉 <b>ПОБЕДА!</b> ({p_val} > {b_val})\nВыигрыш: <b>+{win} 💰</b>"
+        text = (
+            f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n"
+            f"💰 Коэффициент: <b>x1.95</b>\n"
+            f"💵 Выигрыш: <b>+{win} 💰</b>"
+        )
     elif p_val < b_val:
         await db.record_game(user_id, "loss")
-        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\nПотеряно: <b>-{bet} 💰</b>"
+        text = (
+            f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n"
+            f"📉 Потеряно: <b>-{bet} 💰</b>"
+        )
     else:
-        await db.change_balance(user_id, bet)
+        await db.change_balance(user_id, bet)  # 100% возврат
         await db.record_game(user_id, "draw")
-        text = f"🤝 <b>НИЧЬЯ!</b> ({p_val} = {b_val})\nСтавка возвращена: <b>{bet} 💰</b>"
+        text = (
+            f"╔════════════════════╗\n"
+            f"      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n"
+            f"╚════════════════════╝\n\n"
+            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
+            f"💎 <i>Силы равны — ставка в сохранности!</i>\n\n"
+            f"💰 <b>Возврат:</b> <code>+{bet} 💰</code>"
+        )
 
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= КУБИК ДУЭЛИ МЕЖДУ ИГРОКАМИ (/duel) =================
+# ================= РЕЖИМ 2 КУБИКА (/doubledice) (1.95x / 3x) =================
+@dp.message(Command("doubledice"))
+async def cmd_double_dice(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name)
+
+    bet = 20
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2]} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    await message.answer(f"🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)}:</b>", parse_mode="HTML")
+    p1 = (await message.answer_dice(emoji="🎲")).dice.value
+    p2 = (await message.answer_dice(emoji="🎲")).dice.value
+    p_sum = p1 + p2
+    await asyncio.sleep(4.0)
+
+    await message.answer("🤖 <b>Бросок двух кубиков Бота:</b>", parse_mode="HTML")
+    b1 = (await message.answer_dice(emoji="🎲")).dice.value
+    b2 = (await message.answer_dice(emoji="🎲")).dice.value
+    b_sum = b1 + b2
+    await asyncio.sleep(4.0)
+
+    if p_sum > b_sum:
+        is_double = (p1 == p2)
+        mult = 3.0 if is_double else 1.95
+        win = int(bet * mult)
+
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+
+        bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
+        res = (
+            f"🎉 <b>ПОБЕДА!</b>\n\n"
+            f"👤 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
+            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
+            f"{bonus_title}"
+            f"💵 Выигрыш: <b>+{win} 💰</b>"
+        )
+    elif p_sum < b_sum:
+        await db.record_game(user_id, "loss")
+        res = (
+            f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n"
+            f"👤 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
+            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
+            f"📉 Потеряно: <b>-{bet} 💰</b>"
+        )
+    else:
+        await db.change_balance(user_id, bet)
+        await db.record_game(user_id, "draw")
+        res = (
+            f"╔════════════════════╗\n"
+            f"    ⚖️ <b>DOUBLE НИЧЬЯ! ({p_sum} = {b_sum})</b> ⚖️\n"
+            f"╚════════════════════╝\n\n"
+            f"💰 Ставка <b>{bet} 💰</b> возвращена на счет!"
+        )
+
+    await message.answer(res, parse_mode="HTML")
+
+
+# ================= PVP ДУЭЛИ МЕЖДУ ИГРОКАМИ (/duel) (1.95x) =================
 @dp.message(Command("duel"))
 async def cmd_duel(message: Message, command: CommandObject):
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
@@ -397,7 +492,7 @@ async def cmd_duel(message: Message, command: CommandObject):
         f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
         f"🔴 Вызывающий: {get_mention(challenger.id, challenger.full_name)}\n"
         f"🔵 Оппонент: {get_mention(opponent.id, opponent.full_name)}\n"
-        f"💰 Ставка: <b>{bet} 💰</b>\n\n"
+        f"💰 Ставка: <b>{bet} 💰</b> (Чистый приз победителя: <b>+{int(bet * 1.95)} 💰</b>)\n\n"
         f"<i>У оппонента есть 60 секунд на принятие.</i>"
     )
 
@@ -433,7 +528,7 @@ async def cb_accept_duel(call: CallbackQuery):
 
     if c_data[2] < bet or o_data[2] < bet:
         del active_duels[duel_id]
-        await call.message.edit_text("❌ Дуэль отменена: у одного из игроков недостаточно средств!")
+        await call.message.edit_text("❌ Дуэль отменена: у одного из участников изменился баланс!")
         return
 
     await db.change_balance(c_id, -bet)
@@ -441,7 +536,7 @@ async def cb_accept_duel(call: CallbackQuery):
     await db.add_turnover(c_id, bet)
     await db.add_turnover(o_id, bet)
 
-    await call.message.edit_text(f"⚔️ <b>Дуэль началась! Банк: {bet * 2} 💰</b>", parse_mode="HTML")
+    await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка каждого: <b>{bet} 💰</b>", parse_mode="HTML")
 
     await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
     c_dice = await call.message.answer_dice(emoji="🎲")
@@ -453,32 +548,40 @@ async def cb_accept_duel(call: CallbackQuery):
     o_val = o_dice.dice.value
     await asyncio.sleep(4.0)
 
+    # Приз с комиссией 5% (1.95x от ставки)
+    win_sum = int(bet * 1.95)
+
     if c_val > o_val:
-        win_sum = bet * 2
         await db.change_balance(c_id, win_sum)
         await db.record_game(c_id, "win")
         await db.record_game(o_id, "loss")
         res = (
             f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n"
             f"💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{bet} 💰 ]\n\n"
-            f"💸 Победитель забирает банк: <b>+{win_sum} 💰</b>"
+            f"💵 Выигрыш победителя (x1.95): <b>+{win_sum} 💰</b>"
         )
     elif o_val > c_val:
-        win_sum = bet * 2
         await db.change_balance(o_id, win_sum)
         await db.record_game(o_id, "win")
         await db.record_game(c_id, "loss")
         res = (
             f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n"
             f"💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{bet} 💰 ]\n\n"
-            f"💸 Победитель забирает банк: <b>+{win_sum} 💰</b>"
+            f"💵 Выигрыш победителя (x1.95): <b>+{win_sum} 💰</b>"
         )
     else:
         await db.change_balance(c_id, bet)
         await db.change_balance(o_id, bet)
         await db.record_game(c_id, "draw")
         await db.record_game(o_id, "draw")
-        res = f"🤝 <b>Ничья ({c_val} = {o_val})!</b> Ставки возвращены."
+        res = (
+            f"╔════════════════════╗\n"
+            f"      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n"
+            f"╚════════════════════╝\n\n"
+            f"🔴 {duel['challenger_name']}: [ <b>{c_val}</b> ]\n"
+            f"🔵 {duel['opponent_name']}: [ <b>{o_val}</b> ]\n\n"
+            f"💰 Ставки возвращены в полном объеме (+{bet} 💰 каждому)."
+        )
 
     del active_duels[duel_id]
     await call.message.answer(res, parse_mode="HTML")
@@ -513,8 +616,7 @@ async def cmd_top(message: Message):
         place = medals.get(i, f"<b>{i}.</b>")
         safe_name = name.replace("<", "&lt;").replace(">", "&gt;") if name else "Аноним"
         text += f"{place} {safe_name} — <code>{val} 💰</code>\n"
-
-    await message.answer(text, parse_mode="HTML")
+        await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("add_promo"))
@@ -546,13 +648,13 @@ async def cmd_promo(message: Message, command: CommandObject):
     await message.answer(msg, parse_mode="HTML")
 
 
-# ================= АДМИНКА И МОДЕРАЦИЯ =================
+# ================= АДМИНИСТРИРОВАНИЕ И МОДЕРАЦИЯ =================
 @dp.message(Command("give"))
 async def cmd_give(message: Message, command: CommandObject):
     if not await db.is_admin(message.from_user.id):
         return
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Используйте команду ответом на сообщение пользователя!")
+        return await message.answer("❌ Ответьте на сообщение игрока для выдачи!")
     if not command.args:
         return await message.answer("❌ Укажите сумму: <code>/give 1000</code>", parse_mode="HTML")
 
@@ -574,7 +676,7 @@ async def cmd_add_admin(message: Message):
     if not await db.is_admin(message.from_user.id):
         return
     if not message.reply_to_message:
-        return await message.answer("❌ Ответьте этой командой на сообщение пользователя.")
+        return await message.answer("❌ Ответьте этой командой на сообщение нового администратора.")
 
     target = message.reply_to_message.from_user
     await db.add_admin(target.id)
@@ -616,7 +718,7 @@ async def cmd_mute(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка мута: {e}")
 
 
 @dp.message(Command("unmute"))
@@ -646,6 +748,37 @@ async def cmd_unmute(message: Message):
         await message.answer(f"❌ Ошибка: {e}")
 
 
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+        return
+    target = message.reply_to_message.from_user
+    if target.id == OWNER_ID or await db.is_admin(target.id):
+        return await message.answer("❌ Нельзя наказать администратора!")
+
+    try:
+        await message.chat.ban(user_id=target.id)
+        await message.answer(f"🛑 {get_mention(target.id, target.full_name)} забанен.", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message, command: CommandObject):
+    if not await db.is_admin(message.from_user.id) or not command.args:
+        return await message.answer("Использование: <code>/unban [USER_ID]</code>", parse_mode="HTML")
+
+    if not command.args.isdigit():
+        return await message.answer("❌ ID пользователя должен состоять из цифр!")
+
+    user_id = int(command.args)
+    try:
+        await message.chat.unban(user_id=user_id, only_if_banned=True)
+        await message.answer(f"✅ Пользователь с ID <code>{user_id}</code> разбанен в чате.", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка разбана: {e}")
+
+
 @dp.message(Command("warn"))
 async def cmd_warn(message: Message):
     if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
@@ -667,27 +800,7 @@ async def cmd_warn(message: Message):
             await message.answer(f"❌ Ошибка при бане: {e}")
     else:
         await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
-@dp.message(Command("ban"))
-async def cmd_ban(message: Message):
-    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
-        return
-    target = message.reply_to_message.from_user
-    try:
-        await message.chat.ban(user_id=target.id)
-        await message.answer(f"🛑 Пользователь забанен.", parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
 
-@dp.message(Command("unban"))
-async def cmd_unban(message: Message, command: CommandObject):
-    if not await db.is_admin(message.from_user.id) or not command.args:
-        return await message.answer("❌ Укажите ID: /unban ID")
-    try:
-        user_id = int(command.args)
-        await message.chat.unban(user_id=user_id)
-        await message.answer("✅ Пользователь разбанен.")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("unwarn"))
 async def cmd_unwarn(message: Message):
@@ -706,20 +819,18 @@ async def on_startup(bot: Bot):
         logging.info(f"Установка Webhook: {webhook_url}")
         await bot.set_webhook(webhook_url, drop_pending_updates=True)
     else:
-        logging.info("RENDER_EXTERNAL_URL не задан, запуск в режиме веб-сервера без авто-вебхука.")
+        logging.info("RENDER_EXTERNAL_URL не задан, сервер ожидает локального запуска.")
 
 
 def main():
     if RENDER_EXTERNAL_URL:
-        # Запуск Webhook для Render / Хостингов
         app = web.Application()
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path=WEBHOOK_PATH)
+    `   webhook_handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
         app.on_startup.append(lambda app: on_startup(bot))
         web.run_app(app, host="0.0.0.0", port=PORT)
     else:
-        # Автоматический fallback на локальный Polling
         async def run_polling():
             await db.init()
             await bot.delete_webhook(drop_pending_updates=True)
