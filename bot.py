@@ -73,7 +73,7 @@ async def check_subscription(user_id: int) -> bool:
         logging.error(f"Непредвиденная ошибка: {e}")
         return False
 
-def get_subscription_keyboard() -> InlineKeyboardMarkup:
+def get_subscription_keyboard() -> InlineKeyboardBuilder:
     """Генерирует инлайн-кнопки со ссылками и проверкой."""
     channel_url = f"https://t.me{CHANNEL_ID.replace('@', '')}" if str(CHANNEL_ID).startswith('@') else "https://t.meyour_channel"
     chat_url = f"https://t.me{CHAT_ID.replace('@', '')}" if str(CHAT_ID).startswith('@') else "https://t.meyour_chat"
