@@ -58,7 +58,7 @@ def get_mention(user_id: int, name: str) -> str:
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", ""]:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@DuelCubesChannel", "none", ""]:
         return True
     try:
         chat_id = REQUIRED_CHANNEL if REQUIRED_CHANNEL.startswith("@") or REQUIRED_CHANNEL.startswith("-100") else f"@{REQUIRED_CHANNEL}"
