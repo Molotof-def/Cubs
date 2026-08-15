@@ -73,53 +73,8 @@ async def check_subscription(user_id: int) -> bool:
         logging.error(f"Непредвиденная ошибка: {e}")
         return False
 
-def get_subscription_keyboard() -> InlineKeyboardBuilder:
-    """Генерирует инлайн-кнопки со ссылками и проверкой."""
-    channel_url = f"https://t.me{CHANNEL_ID.replace('@', '')}" if str(CHANNEL_ID).startswith('@') else "https://t.meyour_channel"
-    chat_url = f"https://t.me{CHAT_ID.replace('@', '')}" if str(CHAT_ID).startswith('@') else "https://t.meyour_chat"
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться на Канал", url=channel_url)],
-        [InlineKeyboardButton(text="💬 Вступить в Чат", url=chat_url)],
-        [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")]
-    ])
-
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    """Глобальный обработчик команды /start."""
-    if await check_subscription(message.from_user.id):
-        await message.answer(f"👋 Привет, {message.from_user.full_name}! Доступ открыт. Чем могу помочь?")
-    else:
-        await message.answer(
-            "⚠️ Для активации бота необходимо подписаться на наш канал и вступить в чат!",
-            reply_markup=get_subscription_keyboard()
-        )
-
-@dp.callback_query(lambda c: c.data == "check_sub")
-async def process_check_sub(callback_query: types.CallbackQuery):
-    """Проверка нажатия кнопки обновления статуса."""
-    if await check_subscription(callback_query.from_user.id):
-        await callback_query.answer("🎉 Успешно! Доступ разблокирован.", show_alert=True)
-        await callback_query.message.edit_text(
-            f"Привет, {callback_query.from_user.full_name}! Все проверки пройдены. Бот готов к работе."
-        )
-    else:
-        await callback_query.answer("❌ Вы всё ещё не выполнили условия подписки!", show_alert=True)
-
-@dp.message()
-async def block_all_messages(message: types.Message):
-    """Декоратор-заглушка. Перехватывает любые сообщения, если нет подписки."""
-    if not await check_subscription(message.from_user.id):
-        await message.answer(
-            "🔏 Функция недоступна. Пожалуйста, выполните условия подписки:",
-            reply_markup=get_subscription_keyboard()
-        )
-    else:
-        # Сюда вставляется основная логика работы вашего бота для верифицированных пользователей
-        await message.answer("✅ Ваше сообщение обработано (основная логика бота).")
-
-async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@твой_канал":
+ion(user_id: int) -> bool:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@DuelCubesChannel":
         return True
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
