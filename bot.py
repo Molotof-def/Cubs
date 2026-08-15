@@ -51,7 +51,7 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@твой_канал":
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@DuelCubesStars":
         return True
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
