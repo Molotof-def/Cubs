@@ -24,17 +24,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     exit("❌ ОШИБКА: Токен бота не найден в переменных окружения (BOT_TOKEN)!")
 
-OWNER_ID_RAW = os.getenv("OWNER_ID")
-if not OWNER_ID_RAW:
-    exit("❌ ОШИБКА: OWNER_ID не найден в переменных окружения!")
-OWNER_ID = int(OWNER_ID_RAW)
+OWNER_ID_RAW = os.getenv("OWNER_ID", "0")
+OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else 0
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL в Render.")
 
-# Обязательный канал (например: @ludoniks или -1001234567890)
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesStars").strip()
+# Юзернейм канала с собачкой, например: @DuelCubesChannel
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -52,21 +50,24 @@ def get_mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
+# БЕЗОПАСНАЯ ПРОВЕРКА ПОДПИСКИ
 async def check_subscription(user_id: int) -> bool:
     if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@DuelCubesChannel":
         return True
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        # Статусы подписанного игрока
         return member.status in ["creator", "administrator", "member", "restricted"]
     except Exception as e:
-        logging.error(f"Ошибка проверки подписки: {e}")
-        return False
+        logging.warning(f"⚠️ Ошибка проверки канала {REQUIRED_CHANNEL}: {e}. Проверьте, что бот назначен АДМИНОМ канала!")
+        # Если бот не админ в канале, не ломаем игру пользователям:
+        return True
 
 
 def sub_keyboard():
     builder = InlineKeyboardBuilder()
     clean_tag = REQUIRED_CHANNEL.replace("@", "")
-    channel_url = f"https://t.me/{clean_tag}" if not REQUIRED_CHANNEL.startswith("-100") else "https://t.me/"
+    channel_url = f"https://t.me/{clean_tag}"
     builder.button(text="📢 Подписаться на канал", url=channel_url)
     return builder.as_markup()
 
@@ -227,14 +228,6 @@ class Database:
 db = Database(DATABASE_URL)
 
 
-# Middleware: Автосохранение username из любого чата
-@dp.message.outer_middleware()
-async def user_tracking_middleware(handler, event: Message, data: dict):
-    if event.from_user and not event.from_user.is_bot:
-        await db.register_user(event.from_user.id, event.from_user.full_name, event.from_user.username)
-    return await handler(event, data)
-
-
 # ================= КЛАВИАТУРЫ =================
 def duel_keyboard(duel_id: str):
     builder = InlineKeyboardBuilder()
@@ -255,13 +248,14 @@ async def cmd_start(message: Message, command: CommandObject):
 
     await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username, ref_id)
     user = await db.get_user(message.from_user.id)
+    balance = user[2] if user else 100
 
     text = (
         f"🎲 <b>Добро пожаловать в Dice Club!</b>\n\n"
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
-        f"💰 Твой баланс: <b>{user[2]} монет</b>\n\n"
+        f"💰 Твой баланс: <b>{balance} монет</b>\n\n"
         f"📜 <b>Игровые команды:</b>\n"
-        f"⚔️ <code>/duel [ставка]</code> (ответом) — дуэль 1 vs 1\n"
+        f"⚔️ <code>/duel [ставка]</code> (ответом на сообщение) — дуэль 1 vs 1\n"
         f"🎲 <code>/dice [ставка]</code> — бросить кубик против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (x3 за дубль!)\n\n"
         f"💳 <b>Финансы и Профиль:</b>\n"
@@ -293,10 +287,8 @@ async def cmd_ref(message: Message):
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
     user = await db.get_user(user_id)
-    if not user:
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        user = await db.get_user(user_id)
 
     _, name, balance, turnover, wins, losses, draws, warns, _ = user
     total_games = wins + losses + draws
@@ -332,6 +324,9 @@ async def cmd_pay(message: Message, command: CommandObject):
     amount = int(command.args)
     if amount <= 0:
         return await message.answer("❌ Сумма перевода должна быть больше 0!")
+
+    await db.register_user(sender.id, sender.full_name, sender.username)
+    await db.register_user(recipient.id, recipient.full_name, recipient.username)
 
     sender_data = await db.get_user(sender.id)
     if not sender_data or sender_data[2] < amount:
@@ -379,6 +374,7 @@ async def process_successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     if payload.startswith("stars_deposit_"):
         coins = int(payload.replace("stars_deposit_", ""))
+        await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         await db.change_balance(message.from_user.id, coins)
         await message.answer(
             f"🎉 <b>Оплата прошла успешно!</b>\n\n"
@@ -393,7 +389,9 @@ async def process_successful_payment(message: Message):
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
     if not await check_subscription(user_id):
-        return await message.answer("⚠️ <b>Для игры необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     bet = 15
     if command.args and command.args.isdigit():
@@ -448,7 +446,9 @@ async def cmd_dice(message: Message, command: CommandObject):
 async def cmd_double_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
     if not await check_subscription(user_id):
-        return await message.answer("⚠️ <b>Для игры необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     bet = 20
     if command.args and command.args.isdigit():
@@ -508,7 +508,7 @@ async def cmd_double_dice(message: Message, command: CommandObject):
 @dp.message(Command("duel"))
 async def cmd_duel(message: Message, command: CommandObject):
     if not await check_subscription(message.from_user.id):
-        return await message.answer("⚠️ <b>Для игры необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
         return await message.answer("❌ Ответьте этой командой на сообщение оппонента!")
@@ -525,6 +525,9 @@ async def cmd_duel(message: Message, command: CommandObject):
 
     if bet <= 0:
         return await message.answer("❌ Ставка должна быть больше 0!")
+
+    await db.register_user(challenger.id, challenger.full_name, challenger.username)
+    await db.register_user(opponent.id, opponent.full_name, opponent.username)
 
     c_data = await db.get_user(challenger.id)
     o_data = await db.get_user(opponent.id)
@@ -576,7 +579,7 @@ async def cb_accept_duel(call: CallbackQuery):
         return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
 
     if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал спонсора!", show_alert=True)
+        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы принять вызов!", show_alert=True)
 
     if duel["status"] != "pending":
         return await call.answer("Дуэль уже началась!", show_alert=True)
@@ -701,6 +704,7 @@ async def cmd_promo(message: Message, command: CommandObject):
     if not command.args:
         return await message.answer("Формат: <code>/promo [КОД]</code>", parse_mode="HTML")
 
+    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     _, msg = await db.activate_promo(message.from_user.id, command.args.strip())
     await message.answer(msg, parse_mode="HTML")
 
@@ -721,6 +725,7 @@ async def cmd_give(message: Message, command: CommandObject):
         return await message.answer("❌ Сумма должна быть числом!")
 
     target = message.reply_to_message.from_user
+    await db.register_user(target.id, target.full_name, target.username)
     await db.change_balance(target.id, amount)
 
     verb = "выдал" if amount >= 0 else "забрал"
@@ -869,6 +874,7 @@ async def cmd_warn(message: Message):
     if target.id == OWNER_ID or await db.is_admin(target.id):
         return await message.answer("❌ Нельзя выдать варн администратору!")
 
+    await db.register_user(target.id, target.full_name, target.username)
     warns = await db.add_warn(target.id)
 
     if warns >= 3:
