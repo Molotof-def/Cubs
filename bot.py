@@ -826,7 +826,7 @@ def main():
     if RENDER_EXTERNAL_URL:
         app = web.Application()
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    `   webhook_handler.register(app, path=WEBHOOK_PATH)
+        webhook_handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
         app.on_startup.append(lambda app: on_startup(bot))
         web.run_app(app, host="0.0.0.0", port=PORT)
