@@ -761,7 +761,7 @@ async def cmd_odd(message: Message, command: CommandObject):
 async def cmd_miner(message: Message, command: CommandObject):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-if not await check_subscription(user_id):
+    if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
     if user_id in active_miners:
