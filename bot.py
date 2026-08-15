@@ -45,7 +45,7 @@ dp = Dispatcher()
 active_duels: Dict[str, dict] = {}
 # Хранилище активных чеков: {check_id: {...}}
 active_checks: Dict[str, dict] = {}
-
+active_miners: Dict[int, dict] = {}
 async def on_startup(bot: Bot):
     await db.init()
     
@@ -321,7 +321,339 @@ async def cmd_ref(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+# 📈 БОЛЬШЕ (4, 5, 6)
+@dp.message(Command("over"))
+async def cmd_over(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    bet = 15
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>БОЛЬШЕ (4-6)</b>:", parse_mode="HTML")
+    dice_msg = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = dice_msg.dice.value
+
+    if val in [4, 5, 6]:
+        win = int(bet * 1.95)
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+    else:
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
+
+    await message.answer(res, parse_mode="HTML")
+
+
+# 📉 МЕНЬШЕ (1, 2, 3)
+@dp.message(Command("under"))
+async def cmd_under(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    bet = 15
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>МЕНЬШЕ (1-3)</b>:", parse_mode="HTML")
+    dice_msg = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = dice_msg.dice.value
+
+    if val in [1, 2, 3]:
+        win = int(bet * 1.95)
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+    else:
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
+
+    await message.answer(res, parse_mode="HTML")
+# ⚖️ ЧЁТНОЕ (2, 4, 6)
+@dp.message(Command("even"))
+async def cmd_even(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    bet = 15
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>ЧЁТНОЕ (2, 4, 6)</b>:", parse_mode="HTML")
+    dice_msg = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = dice_msg.dice.value
+
+    if val % 2 == 0:
+        win = int(bet * 1.95)
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+    else:
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
+
+    await message.answer(res, parse_mode="HTML")
+
+
+# 🎲 НЕЧЁТНОЕ (1, 3, 5)
+@dp.message(Command("odd"))
+async def cmd_odd(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    bet = 15
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>НЕЧЁТНОЕ (1, 3, 5)</b>:", parse_mode="HTML")
+    dice_msg = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = dice_msg.dice.value
+
+    if val % 2 != 0:
+        win = int(bet * 1.95)
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+    else:
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
+
+    await message.answer(res, parse_mode="HTML")
+MINER_MULTS = {
+    0: 0.95,
+    1: 1.2,
+    2: 1.5,
+    3: 2.0,
+    4: 2.8,
+    5: 3.8
+}
+
+def render_miner_field(opened_cells: set, mine_index: int, show_mine: bool = False) -> str:
+    field = []
+    for i in range(1, 7):
+        if i in opened_cells:
+            field.append("💎")
+        elif show_mine and i == mine_index:
+            field.append("💣")
+        else:
+            field.append("⬛️")
+    return "".join(field)
+
+def miner_keyboard(user_id: int, current_mult: float, next_mult: Optional[float]):
+    builder = InlineKeyboardBuilder()
+    if next_mult is not None:
+        builder.button(text=f"🎲 Кинуть куб (след. x{next_mult})", callback_data=f"miner_roll_{user_id}")
+    builder.button(text=f"💰 Забрать (x{current_mult})", callback_data=f"miner_cash_{user_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# Запуск игры Сапёр
+@dp.message(Command("miner"))
+async def cmd_miner(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    if user_id in active_miners:
+        return await message.answer("❌ У вас уже запущена игра в Сапёра! Завершите её.")
+
+    bet = 20
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    mine_pos = random.randint(1, 6)
+    active_miners[user_id] = {
+        "bet": bet,
+        "mine": mine_pos,
+        "opened": set(),
+        "step": 0
+    }
+
+    text = (
+        f"💣 <b>КУБИЧЕСКИЙ САПЁР (1x6)</b>\n\n"
+        f"Поле: {render_miner_field(set(), mine_pos)}\n"
+        f"💰 Ставка: <b>{bet} 💰</b>\n"
+        f"💎 Открыто клеток: <b>0/5</b>\n"
+        f"📈 Текущий множитель: <b>x0.95</b> (забрать: <b>{int(bet * 0.95)} 💰</b>)\n\n"
+        f"<i>Бросайте кубик, чтобы открывать клетки (1-6). На поле спрятана 1 мина!</i>"
+    )
+    await message.answer(text, reply_markup=miner_keyboard(user_id, 0.95, 1.2), parse_mode="HTML")
+
+# Нажатие «Кинуть куб»
+@dp.callback_query(F.data.startswith("miner_roll_"))
+async def cb_miner_roll(call: CallbackQuery):
+    user_id = int(call.data.replace("miner_roll_", ""))
+    if call.from_user.id != user_id:
+        return await call.answer("❌ Это не ваша игра!", show_alert=True)
+
+    if user_id not in active_miners:
+        return await call.answer("❌ Игра уже завершена!", show_alert=True)
+
+    game = active_miners[user_id]
+    await call.message.edit_reply_markup(reply_markup=None)
+
+    await call.message.answer(f"🎲 Бросок кубика для {get_mention(user_id, call.from_user.full_name)}:", parse_mode="HTML")
+    dice_msg = await call.message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    rolled_cell = dice_msg.dice.value
+
+    # Проверка на мину
+    if rolled_cell == game["mine"]:
+        bet = game["bet"]
+        del active_miners[user_id]
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+
+        field_view = render_miner_field(game["opened"], game["mine"], show_mine=True)
+        res = (
+            f"💥 <b>БАБАХ! Выпало число [{rolled_cell}] — ТАМ МИНА!</b>\n\n"
+            f"Поле: {field_view}\n"
+            f"💀 Вы подорвались и потеряли: <b>-{bet} 💰</b>"
+        )
+        return await call.message.answer(res, parse_mode="HTML")
+
+    # Если клетка уже была открыта ранее
+    if rolled_cell in game["opened"]:
+        current_mult = MINER_MULTS[game["step"]]
+        next_step = game["step"] + 1
+        next_mult = MINER_MULTS.get(next_step)
+        field_view = render_miner_field(game["opened"], game["mine"])
+        res = (
+            f"🔄 Выпало число [ <b>{rolled_cell}</b> ], но эта клетка уже была открыта!\n"
+            f"Множитель остался прежним.\n\n"
+            f"Поле: {field_view}\n"
+            f"💎 Открыто: <b>{game['step']}/5</b> | Множитель: <b>x{current_mult}</b>"
+        )
+        return await call.message.answer(res, reply_markup=miner_keyboard(user_id, current_mult, next_mult), parse_mode="HTML")
+
+    # Открытие новой безопасной клетки
+    game["opened"].add(rolled_cell)
+    game["step"] += 1
+    step = game["step"]
+    current_mult = MINER_MULTS[step]
+    field_view = render_miner_field(game["opened"], game["mine"])
+
+    if step >= 5:  # Открыты все 5 безопасных клеток
+        win = int(game["bet"] * current_mult)
+        del active_miners[user_id]
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+        res = (
+            f"👑 <b>ФАНТАСТИКА! ВСЕ БЕЗОПАСНЫЕ КЛЕТКИ ОТКРЫТЫ!</b>\n\n"
+            f"Поле: {field_view}\n"
+            f"🔥 Максимальный множитель: <b>x{current_mult}</b>\n"
+            f"💵 Выигрыш: <b>+{win} 💰</b>"
+        )
+        return await call.message.answer(res, parse_mode="HTML")
+
+    next_mult = MINER_MULTS.get(step + 1)
+    res = (
+        f"💎 <b>УСПЕХ! Открыта чистая клетка [{rolled_cell}]!</b>\n\n"
+        f"Поле: {field_view}\n"
+        f"💎 Открыто клеток: <b>{step}/5</b>\n"
+        f"📈 Текущий множитель: <b>x{current_mult}</b> (забрать: <b>{int(game['bet'] * current_mult)} 💰</b>)"
+    )
+    await call.message.answer(res, reply_markup=miner_keyboard(user_id, current_mult, next_mult), parse_mode="HTML")
+
+
+# Нажатие «Забрать»
+@dp.callback_query(F.data.startswith("miner_cash_"))
+async def cb_miner_cash(call: CallbackQuery):
+    user_id = int(call.data.replace("miner_cash_", ""))
+    if call.from_user.id != user_id:
+        return await call.answer("❌ Это не ваша игра!", show_alert=True)
+
+    if user_id not in active_miners:
+        return await call.answer("❌ Игра уже завершена!", show_alert=True)
+
+    game = active_miners[user_id]
+    mult = MINER_MULTS[game["step"]]
+    win = int(game["bet"] * mult)
+
+    del active_miners[user_id]
+    await db.change_balance(user_id, win)
+    await db.record_game(user_id, "win" if mult >= 1.0 else "loss")
+
+    field_view = render_miner_field(game["opened"], game["mine"], show_mine=True)
+    await call.message.edit_reply_markup(reply_markup=None)
+
+    res = (
+        f"💰 <b>ВЫ УСПЕШНО ЗАБРАЛИ КУШ!</b>\n\n"
+        f"Поле: {field_view}\n"
+        f"💎 Открыто клеток: <b>{game['step']}/5</b>\n"
+        f"📈 Итоговый множитель: <b>x{mult}</b>\n"
+        f"💵 На баланс зачислено: <b>+{win} 💰</b>"
+    )
+    await call.message.answer(res, parse_mode="HTML")
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     user_id = message.from_user.id
