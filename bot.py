@@ -3,7 +3,7 @@ import asyncio
 import logging
 import random
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import asyncpg
 from aiohttp import web
@@ -43,6 +43,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 active_duels: Dict[str, dict] = {}
+# Хранилище активных чеков: {check_id: {...}}
+active_checks: Dict[str, dict] = {}
 
 
 def get_mention(user_id: int, name: str) -> str:
@@ -51,13 +53,13 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@DuelCubesStars":
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@твой_канал":
         return True
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
         return member.status in ["creator", "administrator", "member", "restricted"]
     except Exception as e:
-        logging.warning(f"⚠️ Ошибка проверки подписки: {e}. Проверьте, что бот добавлен в АДМИНЫ канала!")
+        logging.warning(f"⚠️ Ошибка проверки подписки: {e}. Проверьте права бота в канале!")
         return True
 
 
@@ -69,7 +71,7 @@ def sub_keyboard():
     return builder.as_markup()
 
 
-# ================= БАЗА ДАННЫХ (POSTGRESQL С АВТОМИГРАЦИЕЙ) =================
+# ================= БАЗА ДАННЫХ (POSTGRESQL) =================
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -80,14 +82,13 @@ class Database:
         self.pool = await asyncpg.create_pool(dsn=clean_url)
 
         async with self.pool.acquire() as conn:
-            # Создание таблиц
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     tg_username TEXT,
                     referrer_id BIGINT DEFAULT NULL,
-                    balance BIGINT DEFAULT 100,
+                    balance BIGINT DEFAULT 0,
                     turnover BIGINT DEFAULT 0,
                     wins INT DEFAULT 0,
                     losses INT DEFAULT 0,
@@ -108,19 +109,23 @@ class Database:
                     PRIMARY KEY (user_id, code)
                 );
             """)
-            # Автоматическая миграция колонок для существующих таблиц
             await conn.execute("""
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
+            """)
+            await conn.execute("""
+                INSERT INTO promo_codes (code, reward, uses_left) 
+                VALUES ('START', 100, 10) 
+                ON CONFLICT (code) DO NOTHING;
             """)
 
     async def register_user(self, user_id: int, username: str, tg_username: Optional[str] = None, referrer_id: Optional[int] = None):
         clean_tag = tg_username.replace("@", "").lower() if tg_username else None
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO users (user_id, username, tg_username, referrer_id) 
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO users (user_id, username, tg_username, referrer_id, balance) 
+                VALUES ($1, $2, $3, $4, 0)
                 ON CONFLICT (user_id) DO UPDATE SET 
                     username = EXCLUDED.username,
                     tg_username = COALESCE(EXCLUDED.tg_username, users.tg_username)
@@ -187,6 +192,7 @@ class Database:
     async def add_admin(self, user_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+
     async def add_warn(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET warns = warns + 1 WHERE user_id = $1", user_id)
@@ -240,6 +246,12 @@ def duel_keyboard(duel_id: str):
     return builder.as_markup()
 
 
+def check_keyboard(check_id: str, claimed: int, total: int):
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💰 Забрать куш ({claimed}/{total})", callback_data=f"claim_check_{check_id}")
+    return builder.as_markup()
+
+
 # ================= ОСНОВНЫЕ КОМАНДЫ =================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
@@ -251,7 +263,7 @@ async def cmd_start(message: Message, command: CommandObject):
 
     await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username, ref_id)
     user = await db.get_user(message.from_user.id)
-    balance = user[2] if user else 100
+    balance = user[2] if user else 0
 
     text = (
         f"🎲 <b>Добро пожаловать в Dice Club!</b>\n\n"
@@ -261,13 +273,15 @@ async def cmd_start(message: Message, command: CommandObject):
         f"⚔️ <code>/duel [ставка]</code> (ответом) — дуэль 1 vs 1\n"
         f"🎲 <code>/dice [ставка]</code> — бросить кубик против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (x3 за дубль!)\n\n"
+        f"🎁 <b>Чеки и Раздачи:</b>\n"
+        f"🧧 <code>/check [сумма] [кол-во_человек]</code> — раздать чек в чат\n\n"
         f"💳 <b>Финансы и Профиль:</b>\n"
         f"🤝 <code>/ref</code> — реферальная система (3% с проигрышей друзей)\n"
         f"⭐ <code>/stars [кол-во]</code> — купить монеты за Stars\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
         f"👤 <code>/profile</code> — профиль и статистика\n"
         f"🏆 <code>/top</code> — богатейшие игроки\n"
-        f"🎟 <code>/promo [код]</code> — активировать промокод"
+        f"🎟 <code>/promo [код]</code> — активировать промокод (попробуй: <code>/promo START</code>)"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -345,6 +359,102 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
+# ================= 🎁 ЧЕКИ И РАЗДАЧИ В ЧАТ (/check, /drop) =================
+@dp.message(Command("check"))
+@dp.message(Command("drop"))
+async def cmd_check(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not command.args or len(command.args.split()) < 2:
+        return await message.answer("Использование: <code>/check [сумма] [кол-во_человек]</code>\nПример: <code>/check 500 5</code>", parse_mode="HTML")
+
+    args = command.args.split()
+    if not args[0].isdigit() or not args[1].isdigit():
+        return await message.answer("❌ Сумма и количество человек должны быть числами!", parse_mode="HTML")
+
+    total_amount = int(args[0])
+    people_count = int(args[1])
+
+    if total_amount <= 0 or people_count <= 0:
+        return await message.answer("❌ Сумма и количество участников должны быть больше 0!", parse_mode="HTML")
+
+    if total_amount < people_count:
+        return await message.answer(f"❌ Сумма должна быть не меньше {people_count} монет!", parse_mode="HTML")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < total_amount:
+        bal = user[2] if user else 0
+        return await message.answer(f"❌ Недостаточно средств! Ваш баланс: <b>{bal} 💰</b>", parse_mode="HTML")
+
+    # Списываем сумму чека у создателя
+    await db.change_balance(user_id, -total_amount)
+
+    check_id = f"chk_{message.chat.id}_{random.randint(10000, 99999)}_{int(datetime.now().timestamp())}"
+    per_person = total_amount // people_count
+
+    active_checks[check_id] = {
+        "creator_id": user_id,
+        "creator_name": message.from_user.full_name,
+        "total_amount": total_amount,
+        "per_person": per_person,
+        "total_people": people_count,
+        "claimed_users": []
+    }
+
+    text = (
+        f"🧧 <b>ДЕНЕЖНЫЙ ЧЕК В ЧАТЕ!</b>\n\n"
+        f"👤 Создатель: {get_mention(user_id, message.from_user.full_name)}\n"
+        f"💰 Общая сумма: <b>{total_amount} 💰</b>\n"
+        f"👥 Количество активаций: <b>{people_count}</b> (по <b>{per_person} 💰</b> каждому)\n\n"
+        f"<i>Жми на кнопку ниже, чтобы забрать свою долю!</i>"
+    )
+
+    await message.answer(text, reply_markup=check_keyboard(check_id, 0, people_count), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("claim_check_"))
+async def cb_claim_check(call: CallbackQuery):
+    check_id = call.data.replace("claim_check_", "")
+    user_id = call.from_user.id
+
+    if check_id not in active_checks:
+        return await call.answer("❌ Этот чек уже полностью разобран или недействителен!", show_alert=True)
+
+    check = active_checks[check_id]
+
+    if user_id in check["claimed_users"]:
+        return await call.answer("❌ Вы уже активировали этот чек!", show_alert=True)
+
+    if not await check_subscription(user_id):
+        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы забирать чеки!", show_alert=True)
+
+    await db.register_user(user_id, call.from_user.full_name, call.from_user.username)
+
+    check["claimed_users"].append(user_id)
+    reward = check["per_person"]
+    await db.change_balance(user_id, reward)
+
+    claimed_count = len(check["claimed_users"])
+    total_people = check["total_people"]
+
+    await call.answer(f"🎉 Вы успешно забрали +{reward} 💰!", show_alert=True)
+
+    if claimed_count >= total_people:
+        # Чек закончился
+        del active_checks[check_id]
+        await call.message.edit_text(
+            f"🧧 <b>ДЕНЕЖНЫЙ ЧЕК ЗАВЕРШЁН!</b>\n\n"
+            f"👤 Создатель: {get_mention(check['creator_id'], check['creator_name'])}\n"
+            f"💰 Раздал: <b>{check['total_amount']} 💰</b> на <b>{total_people}</b> человек!\n"
+            f"✅ Все доли успешно получены игроками.",
+            parse_mode="HTML"
+        )
+    else:
+        # Обновляем счетчик на кнопке
+        await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
+
+
 # ================= STARS ПОПОЛНЕНИЕ =================
 @dp.message(Command("stars"))
 @dp.message(Command("donate"))
@@ -387,7 +497,7 @@ async def process_successful_payment(message: Message):
         )
 
 
-# ================= КУБИК ПРОТИВ БОТА (/dice) =================
+# ================= КУБИК ПРОТИВ БОТА (/dice) [ИСПРАВЛЕНО] =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -413,23 +523,31 @@ async def cmd_dice(message: Message, command: CommandObject):
 
     await message.answer(f"🎲 Бросок {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
     p_msg = await message.answer_dice(emoji="🎲")
-    p_val = p_msg.dice.value
     await asyncio.sleep(4.0)
+    p_val = p_msg.dice.value
 
     await message.answer("🤖 Бросок Бота:", parse_mode="HTML")
     b_msg = await message.answer_dice(emoji="🎲")
-    b_val = b_msg.dice.value
     await asyncio.sleep(4.0)
+    b_val = b_msg.dice.value
 
+    # Подведение итогов
     if p_val > b_val:
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        text = (
+            f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n"
+            f"💰 Коэффициент: <b>x1.95</b>\n"
+            f"💵 Выигрыш: <b>+{win} 💰</b>"
+        )
     elif p_val < b_val:
         await db.record_game(user_id, "loss")
         await db.process_referral_loss(user_id, bet)
-        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n📉 Потеряно: <b>-{bet} 💰</b>"
+        text = (
+            f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n"
+            f"📉 Потеряно: <b>-{bet} 💰</b>"
+        )
     else:
         await db.change_balance(user_id, bet)
         await db.record_game(user_id, "draw")
@@ -444,7 +562,7 @@ async def cmd_dice(message: Message, command: CommandObject):
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= 2 КУБИКА (/doubledice) =================
+# ================= 2 КУБИКА (/doubledice) [ИСПРАВЛЕНО] =================
 @dp.message(Command("doubledice"))
 async def cmd_double_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -469,16 +587,20 @@ async def cmd_double_dice(message: Message, command: CommandObject):
     await db.add_turnover(user_id, bet)
 
     await message.answer(f"🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)}:</b>", parse_mode="HTML")
-    p1 = (await message.answer_dice(emoji="🎲")).dice.value
-    p2 = (await message.answer_dice(emoji="🎲")).dice.value
-    p_sum = p1 + p2
+    p_d1 = await message.answer_dice(emoji="🎲")
+    p_d2 = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
+    p1 = p_d1.dice.value
+    p2 = p_d2.dice.value
+    p_sum = p1 + p2
 
     await message.answer("🤖 <b>Бросок двух кубиков Бота:</b>", parse_mode="HTML")
-    b1 = (await message.answer_dice(emoji="🎲")).dice.value
-    b2 = (await message.answer_dice(emoji="🎲")).dice.value
-    b_sum = b1 + b2
+    b_d1 = await message.answer_dice(emoji="🎲")
+    b_d2 = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
+    b1 = b_d1.dice.value
+    b2 = b_d2.dice.value
+    b_sum = b1 + b2
 
     if p_sum > b_sum:
         is_double = (p1 == p2)
@@ -608,13 +730,13 @@ async def cb_accept_duel(call: CallbackQuery):
 
     await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
     c_dice = await call.message.answer_dice(emoji="🎲")
-    c_val = c_dice.dice.value
     await asyncio.sleep(4.0)
+    c_val = c_dice.dice.value
 
     await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
     o_dice = await call.message.answer_dice(emoji="🎲")
-    o_val = o_dice.dice.value
     await asyncio.sleep(4.0)
+    o_val = o_dice.dice.value
 
     win_sum = int(bet * 1.95)
 
@@ -659,7 +781,6 @@ async def cb_decline_duel(call: CallbackQuery):
     duel = active_duels[duel_id]
     if call.from_user.id not in [duel["opponent_id"], duel["challenger_id"]]:
         return await call.answer("❌ Вы не участвуете в этой дуэли!", show_alert=True)
-
     del active_duels[duel_id]
     await call.message.edit_text("❌ <b>Дуэль была отклонена.</b>", parse_mode="HTML")
     await call.answer()
@@ -706,7 +827,7 @@ async def cmd_add_promo(message: Message, command: CommandObject):
 @dp.message(Command("promo"))
 async def cmd_promo(message: Message, command: CommandObject):
     if not command.args:
-        return await message.answer("Формат: <code>/promo [КОД]</code>", parse_mode="HTML")
+        return await message.answer("Формат: <code>/promo [КОД]</code> (например: <code>/promo START</code>)", parse_mode="HTML")
 
     await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
     _, msg = await db.activate_promo(message.from_user.id, command.args.strip())
@@ -750,7 +871,7 @@ async def cmd_add_admin(message: Message):
 
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message, command: CommandObject):
-    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+    if not await db.is_admin(message.from_user.id):
         return
 
     target = message.reply_to_message.from_user
@@ -871,7 +992,7 @@ async def cmd_unban(message: Message, command: CommandObject):
 
 @dp.message(Command("warn"))
 async def cmd_warn(message: Message):
-    if not await db.is_admin(message.from_user.id):
+    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
         return
 
     target = message.reply_to_message.from_user
