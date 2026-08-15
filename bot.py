@@ -4,7 +4,7 @@ import logging
 import random
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
-
+from aiogram.types import BotCommand
 import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
@@ -46,7 +46,30 @@ active_duels: Dict[str, dict] = {}
 # Хранилище активных чеков: {check_id: {...}}
 active_checks: Dict[str, dict] = {}
 
-
+async def on_startup(bot: Bot):
+    await db.init()
+    
+    # Регистрация всплывающих команд при вводе '/'
+    commands = [
+        BotCommand(command="start", description="Главное меню 🎲"),
+        BotCommand(command="dice", description="Кубик против бота 🤖"),
+        BotCommand(command="doubledice", description="Бросок 2 кубиков (x3 за дубль) 🎲🎲"),
+        BotCommand(command="duel", description="Вызвать игрока на дуэль ⚔️"),
+        BotCommand(command="profile", description="Мой профиль и баланс 👤"),
+        BotCommand(command="ref", description="Реферальная ссылка (+3%) 🤝"),
+        BotCommand(command="pay", description="Передать монеты игроку 💸"),
+        BotCommand(command="stars", description="Пополнить баланс за Stars ⭐"),
+        BotCommand(command="top", description="Топ богачей 🏆"),
+        BotCommand(command="promo", description="Активировать промокод 🎟"),
+    ]
+    await bot.set_my_commands(commands)
+    
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+        logging.info(f"Установка Webhook: {webhook_url}")
+        await bot.set_webhook(webhook_url, drop_pending_updates=True)
+    else:
+        logging.info("RENDER_EXTERNAL_URL не задан, сервер ожидает локального запуска.")
 def get_mention(user_id: int, name: str) -> str:
     safe_name = (name or "Игрок").replace("<", "&lt;").replace(">", "&gt;")
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
