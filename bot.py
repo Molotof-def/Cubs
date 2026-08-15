@@ -273,8 +273,6 @@ async def cmd_start(message: Message, command: CommandObject):
         f"⚔️ <code>/duel [ставка]</code> (ответом) — дуэль 1 vs 1\n"
         f"🎲 <code>/dice [ставка]</code> — бросить кубик против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (x3 за дубль!)\n\n"
-        f"🎁 <b>Чеки и Раздачи:</b>\n"
-        f"🧧 <code>/check [сумма] [кол-во_человек]</code> — раздать чек в чат\n\n"
         f"💳 <b>Финансы и Профиль:</b>\n"
         f"🤝 <code>/ref</code> — реферальная система (3% с проигрышей друзей)\n"
         f"⭐ <code>/stars [кол-во]</code> — купить монеты за Stars\n"
@@ -360,6 +358,12 @@ async def cmd_pay(message: Message, command: CommandObject):
 
 
 # ================= 🎁 ЧЕКИ И РАЗДАЧИ В ЧАТ (/check, /drop) =================
+def check_keyboard(check_id: str, claimed: int, total: int):
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💰 Забрать куш ({claimed}/{total})", callback_data=f"claim_check_{check_id}")
+    return builder.as_markup()
+
+# Команда создания чека (/check 500 5)
 @dp.message(Command("check"))
 @dp.message(Command("drop"))
 async def cmd_check(message: Message, command: CommandObject):
@@ -367,30 +371,22 @@ async def cmd_check(message: Message, command: CommandObject):
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     if not command.args or len(command.args.split()) < 2:
-        return await message.answer("Использование: <code>/check [сумма] [кол-во_человек]</code>\nПример: <code>/check 500 5</code>", parse_mode="HTML")
+        return await message.answer("Использование: <code>/check [сумма] [кол-во_человек]</code>", parse_mode="HTML")
 
     args = command.args.split()
     if not args[0].isdigit() or not args[1].isdigit():
         return await message.answer("❌ Сумма и количество человек должны быть числами!", parse_mode="HTML")
 
-    total_amount = int(args[0])
-    people_count = int(args[1])
-
-    if total_amount <= 0 or people_count <= 0:
-        return await message.answer("❌ Сумма и количество участников должны быть больше 0!", parse_mode="HTML")
-
-    if total_amount < people_count:
-        return await message.answer(f"❌ Сумма должна быть не меньше {people_count} монет!", parse_mode="HTML")
+    total_amount, people_count = int(args[0]), int(args[1])
+    if total_amount < people_count or people_count <= 0:
+        return await message.answer("❌ Некорректная сумма или количество!", parse_mode="HTML")
 
     user = await db.get_user(user_id)
     if not user or user[2] < total_amount:
-        bal = user[2] if user else 0
-        return await message.answer(f"❌ Недостаточно средств! Ваш баланс: <b>{bal} 💰</b>", parse_mode="HTML")
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
 
-    # Списываем сумму чека у создателя
     await db.change_balance(user_id, -total_amount)
-
-    check_id = f"chk_{message.chat.id}_{random.randint(10000, 99999)}_{int(datetime.now().timestamp())}"
+    check_id = f"chk_{message.chat.id}_{random.randint(10000, 99999)}"
     per_person = total_amount // people_count
 
     active_checks[check_id] = {
@@ -406,12 +402,44 @@ async def cmd_check(message: Message, command: CommandObject):
         f"🧧 <b>ДЕНЕЖНЫЙ ЧЕК В ЧАТЕ!</b>\n\n"
         f"👤 Создатель: {get_mention(user_id, message.from_user.full_name)}\n"
         f"💰 Общая сумма: <b>{total_amount} 💰</b>\n"
-        f"👥 Количество активаций: <b>{people_count}</b> (по <b>{per_person} 💰</b> каждому)\n\n"
-        f"<i>Жми на кнопку ниже, чтобы забрать свою долю!</i>"
+        f"👥 Активаций: <b>{people_count}</b> (по <b>{per_person} 💰</b> каждому)\n\n"
+        f"<i>Жми на кнопку ниже, чтобы забрать!</i>"
     )
-
     await message.answer(text, reply_markup=check_keyboard(check_id, 0, people_count), parse_mode="HTML")
 
+# Обработка нажатия на кнопку чека
+@dp.callback_query(F.data.startswith("claim_check_"))
+async def cb_claim_check(call: CallbackQuery):
+    check_id = call.data.replace("claim_check_", "")
+    user_id = call.from_user.id
+
+    if check_id not in active_checks:
+        return await call.answer("❌ Чек уже закончился!", show_alert=True)
+
+    check = active_checks[check_id]
+    if user_id in check["claimed_users"]:
+        return await call.answer("❌ Вы уже забирали этот чек!", show_alert=True)
+
+    if not await check_subscription(user_id):
+        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы забирать чеки!", show_alert=True)
+
+    await db.register_user(user_id, call.from_user.full_name, call.from_user.username)
+    check["claimed_users"].append(user_id)
+    await db.change_balance(user_id, check["per_person"])
+
+    claimed_count = len(check["claimed_users"])
+    await call.answer(f"🎉 Вы забрали +{check['per_person']} 💰!", show_alert=True)
+
+    if claimed_count >= check["total_people"]:
+        del active_checks[check_id]
+        await call.message.edit_text(
+            f"🧧 <b>ЧЕК ПОЛНОСТЬЮ РАЗОБРАН!</b>\n"
+            f"👤 Создатель: {get_mention(check['creator_id'], check['creator_name'])}\n"
+            f"💰 Раздал: <b>{check['total_amount']} 💰</b> на <b>{check['total_people']}</b> человек!",
+            parse_mode="HTML"
+        )
+    else:
+        await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, check["total_people"]))
 
 @dp.callback_query(F.data.startswith("claim_check_"))
 async def cb_claim_check(call: CallbackQuery):
@@ -531,23 +559,15 @@ async def cmd_dice(message: Message, command: CommandObject):
     await asyncio.sleep(4.0)
     b_val = b_msg.dice.value
 
-    # Подведение итогов
     if p_val > b_val:
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        text = (
-            f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n"
-            f"💰 Коэффициент: <b>x1.95</b>\n"
-            f"💵 Выигрыш: <b>+{win} 💰</b>"
-        )
+        text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     elif p_val < b_val:
         await db.record_game(user_id, "loss")
         await db.process_referral_loss(user_id, bet)
-        text = (
-            f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n"
-            f"📉 Потеряно: <b>-{bet} 💰</b>"
-        )
+        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n📉 Потеряно: <b>-{bet} 💰</b>"
     else:
         await db.change_balance(user_id, bet)
         await db.record_game(user_id, "draw")
@@ -560,7 +580,6 @@ async def cmd_dice(message: Message, command: CommandObject):
         )
 
     await message.answer(text, parse_mode="HTML")
-
 
 # ================= 2 КУБИКА (/doubledice) [ИСПРАВЛЕНО] =================
 @dp.message(Command("doubledice"))
