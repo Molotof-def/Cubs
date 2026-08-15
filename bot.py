@@ -667,7 +667,27 @@ async def cmd_warn(message: Message):
             await message.answer(f"❌ Ошибка при бане: {e}")
     else:
         await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+        return
+    target = message.reply_to_message.from_user
+    try:
+        await message.chat.ban(user_id=target.id)
+        await message.answer(f"🛑 Пользователь забанен.", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message, command: CommandObject):
+    if not await db.is_admin(message.from_user.id) or not command.args:
+        return await message.answer("❌ Укажите ID: /unban ID")
+    try:
+        user_id = int(command.args)
+        await message.chat.unban(user_id=user_id)
+        await message.answer("✅ Пользователь разбанен.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("unwarn"))
 async def cmd_unwarn(message: Message):
