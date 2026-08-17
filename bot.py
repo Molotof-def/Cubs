@@ -59,6 +59,7 @@ active_ladders: Dict[int, dict] = {}
 active_clan_invites: Dict[str, dict] = {}
 active_withdraws: Dict[str, dict] = {}
 active_gram_invoices: Dict[str, dict] = {}
+active_roulettes: Dict[str, dict] = {}
 chat_recent_users: Dict[int, List[int]] = {}
 
 
@@ -72,7 +73,8 @@ async def send_game_result(message: Message, result_type: str, caption: str, rep
     banners = {
         "win": "🏆 <b>ПОБЕДА!</b>\n\n",
         "loss": "💀 <b>ПОРАЖЕНИЕ!</b>\n\n",
-        "draw": "⚖️ <b>НИЧЬЯ!</b>\n\n"
+        "draw": "⚖️ <b>НИЧЬЯ!</b>\n\n",
+        "roulette": "🔫 <b>РУССКАЯ РУЛЕТКА!</b>\n\n"
     }
     
     full_caption = banners.get(result_type, "") + caption
@@ -447,6 +449,21 @@ def gram_admin_keyboard(inv_id: str):
     return builder.as_markup()
 
 
+def roulette_lobby_keyboard(game_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎯 Присоединиться", callback_data=f"r_join_{game_id}")
+    builder.button(text="🚀 Начать игру", callback_data=f"r_start_{game_id}")
+    builder.button(text="❌ Отмена", callback_data=f"r_cancel_{game_id}")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def roulette_shoot_keyboard(game_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔫 Спустить курок!", callback_data=f"r_shoot_{game_id}")
+    return builder.as_markup()
+
+
 LADDER_STEPS = {0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5}
 
 
@@ -491,6 +508,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
         f"📜 <b>Режимы игр (мин. ставка 100 💰):</b>\n"
+        f"🔫 <code>/roulette [ставка]</code> — Русская Рулетка (выбывание + мут 2ч!) 🔥\n"
         f"⚔️ <code>/duel [ставка]</code> — дуэль 1 на 1 в чате\n"
         f"🎲 <code>/dice [ставка]</code> — бросок против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (х3 за дубль)\n"
@@ -514,6 +532,231 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+# ================= 🔫 РЕЖИМ «РУССКАЯ РУЛЕТКА» (МУТ 2 ЧАСА) =================
+@dp.message(Command("roulette"))
+async def cmd_roulette(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if message.chat.type not in ["group", "supergroup"]:
+        return await message.answer("❌ Русская Рулетка доступна только в групповых чатах!")
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    for gid, g in active_roulettes.items():
+        if g["chat_id"] == chat_id and g["status"] in ["lobby", "playing"]:
+            return await message.answer("❌ В этом чате уже идет игра в Рулетку!")
+
+    bet = 100
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка в рулетке: <b>100 💰</b>!")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    game_id = uuid.uuid4().hex[:8]
+    active_roulettes[game_id] = {
+        "chat_id": chat_id,
+        "creator_id": user_id,
+        "bet": bet,
+        "players": [{"id": user_id, "name": message.from_user.full_name}],
+        "status": "lobby",
+        "current_turn": 0
+    }
+
+    text = (
+        f"🔫 <b>ЛОББИ: РУССКАЯ РУЛЕТКА</b>\n\n"
+        f"👑 Организатор: {get_mention(user_id, message.from_user.full_name)}\n"
+        f"💰 Ставка с каждого: <b>{bet} 💰</b>\n"
+        f"👥 Участники (1/6):\n• {get_mention(user_id, message.from_user.full_name)}\n\n"
+        f"⚠️ <i>Правила: Игроки по очереди спускают курок. При выпадании кубика 1 — выстрел, выбывание и <b>МУТ НА 2 ЧАСА</b>! Выживший забирает весь банк!</i>"
+    )
+    await message.answer(text, reply_markup=roulette_lobby_keyboard(game_id), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("r_join_"))
+async def cb_roulette_join(call: CallbackQuery):
+    game_id = call.data.replace("r_join_", "")
+    user_id = call.from_user.id
+
+    if game_id not in active_roulettes:
+        return await call.answer("❌ Игра не найдена или уже завершена!", show_alert=True)
+
+    game = active_roulettes[game_id]
+    if game["status"] != "lobby":
+        return await call.answer("❌ Игра уже началась!", show_alert=True)
+
+    if any(p["id"] == user_id for p in game["players"]):
+        return await call.answer("❌ Вы уже в игре!", show_alert=True)
+
+    if len(game["players"]) >= 6:
+        return await call.answer("❌ В лобби уже максимум игроков (6/6)!", show_alert=True)
+
+    await db.register_user(user_id, call.from_user.full_name, call.from_user.username)
+    user = await db.get_user(user_id)
+    if not user or user[2] < game["bet"]:
+        return await call.answer(f"❌ Недостаточно средств! Нужно {game['bet']} 💰", show_alert=True)
+
+    await db.change_balance(user_id, -game["bet"])
+    await db.add_turnover(user_id, game["bet"])
+    game["players"].append({"id": user_id, "name": call.from_user.full_name})
+
+    players_list = "\n".join([f"• {get_mention(p['id'], p['name'])}" for p in game["players"]])
+    total_bank = game["bet"] * len(game["players"])
+
+    text = (
+        f"🔫 <b>ЛОББИ: РУССКАЯ РУЛЕТКА</b>\n\n"
+        f"👑 Организатор: {get_mention(game['creator_id'], game['players'][0]['name'])}\n"
+        f"💰 Ставка с каждого: <b>{game['bet']} 💰</b>\n"
+        f"💵 Общий банк: <b>{total_bank} 💰</b>\n"
+        f"👥 Участники ({len(game['players'])}/6):\n{players_list}\n\n"
+        f"⚠️ <i>Наказание за выстрел: <b>МУТ НА 2 ЧАСА</b>!</i>"
+    )
+    await call.message.edit_text(text, reply_markup=roulette_lobby_keyboard(game_id), parse_mode="HTML")
+    await call.answer("✅ Вы успешно вошли в игру!")
+
+
+@dp.callback_query(F.data.startswith("r_cancel_"))
+async def cb_roulette_cancel(call: CallbackQuery):
+    game_id = call.data.replace("r_cancel_", "")
+    if game_id not in active_roulettes:
+        return await call.answer("❌ Игра не найдена!", show_alert=True)
+
+    game = active_roulettes[game_id]
+    if call.from_user.id != game["creator_id"] and not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Только создатель может отменить лобби!", show_alert=True)
+
+    for p in game["players"]:
+        await db.change_balance(p["id"], game["bet"])
+
+    del active_roulettes[game_id]
+    await call.message.edit_text("❌ <b>Лобби Русской Рулетки отменено. Ставки возвращены игрокам.</b>", parse_mode="HTML")
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("r_start_"))
+async def cb_roulette_start(call: CallbackQuery):
+    game_id = call.data.replace("r_start_", "")
+    if game_id not in active_roulettes:
+        return await call.answer("❌ Игра не найдена!", show_alert=True)
+
+    game = active_roulettes[game_id]
+    if call.from_user.id != game["creator_id"] and not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Только создатель может начать игру!", show_alert=True)
+
+    if len(game["players"]) < 2:
+        return await call.answer("❌ Для старта нужно минимум 2 игрока!", show_alert=True)
+
+    game["status"] = "playing"
+    random.shuffle(game["players"])
+    first_player = game["players"][0]
+
+    text = (
+        f"💀 <b>БАРАБАН ЗАКРУЧЕН! ДА НАЧНЕТСЯ ИГРА!</b>\n\n"
+        f"💵 Общий банк: <b>{game['bet'] * len(game['players'])} 💰</b>\n"
+        f"🎯 Ход переходит к: {get_mention(first_player['id'], first_player['name'])}\n\n"
+        f"<i>Приготовьтесь... если выпадет 1 на кубике — выбывание и мут на 2 часа!</i>"
+    )
+    await call.message.edit_text(text, reply_markup=roulette_shoot_keyboard(game_id), parse_mode="HTML")
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("r_shoot_"))
+async def cb_roulette_shoot(call: CallbackQuery):
+    game_id = call.data.replace("r_shoot_", "")
+    if game_id not in active_roulettes:
+        return await call.answer("❌ Игра завершена!", show_alert=True)
+
+    game = active_roulettes[game_id]
+    if game["status"] != "playing":
+        return await call.answer("Игра ещё не активна!", show_alert=True)
+
+    current_idx = game["current_turn"] % len(game["players"])
+    current_player = game["players"][current_idx]
+
+    if call.from_user.id != current_player["id"]:
+        return await call.answer(f"❌ Сейчас очередь игрока: {current_player['name']}!", show_alert=True)
+
+    await call.message.edit_reply_markup(reply_markup=None)
+
+    await call.message.answer(f"🔫 {get_mention(current_player['id'], current_player['name'])} подносит револьвер к виску и нажимает на спуск...", parse_mode="HTML")
+    dice_msg = await call.message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = int(dice_msg.dice.value)
+
+    # ВЫСТРЕЛ (1) -> Выбывание и мут на 2 часа
+    if val == 1:
+        eliminated = game["players"].pop(current_idx)
+        try:
+            await db.record_game(eliminated["id"], "loss")
+            await db.process_referral_loss(eliminated["id"], game["bet"])
+        except Exception:
+            pass
+
+        # Выдаем реальный мут на 2 часа (120 минут)
+        try:
+            until_mute = datetime.now() + timedelta(hours=2)
+            await call.message.chat.restrict(
+                user_id=eliminated["id"],
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_mute
+            )
+            mute_text = "🔇 <i>Выдан мут на 2 часа!</i>"
+        except Exception:
+            mute_text = "⚠️ <i>(Не удалось выдать мут: проверьте права бота)</i>"
+
+        await call.message.answer(
+            f"💥 <b>БАМ! ВЫСТРЕЛ!</b> [ Кубик: <b>1</b> ]\n\n"
+            f"💀 {get_mention(eliminated['id'], eliminated['name'])} выбывает из игры!\n{mute_text}",
+            parse_mode="HTML"
+        )
+
+        # Проверяем, остался ли победитель
+        if len(game["players"]) == 1:
+            winner = game["players"][0]
+            total_prize = int(game["bet"] * (game["current_turn"] + len(game["players"]) + 1) * 0.95)
+            # Полный выигрыш
+            actual_prize = int(game["bet"] * (game["current_turn"] + 2))
+            
+            await db.change_balance(winner["id"], actual_prize)
+            await db.record_game(winner["id"], "win")
+
+            res = (
+                f"👑 <b>ПОБЕДИТЕЛЬ РУССКОЙ РУЛЕТКИ!</b>\n\n"
+                f"👤 {get_mention(winner['id'], winner['name'])}\n"
+                f"🏆 Выжил и забрал весь банк: <b>+{actual_prize} 💰</b>"
+            )
+            del active_roulettes[game_id]
+            return await send_game_result(call.message, "win", res)
+
+    else:
+        await call.message.answer(
+            f"😅 <i>*Щёлк*... Осечка!</i> [ Кубик: <b>{val}</b> ]\n"
+            f"🛡 {get_mention(current_player['id'], current_player['name'])} выжил! Ход переходит дальше.",
+            parse_mode="HTML"
+        )
+        game["current_turn"] += 1
+
+    next_idx = game["current_turn"] % len(game["players"])
+    next_player = game["players"][next_idx]
+
+    text = (
+        f"🔫 <b>РУССКАЯ РУЛЕТКА ПРОДОЛЖАЕТСЯ!</b>\n\n"
+        f"👥 В живых: <b>{len(game['players'])}</b>\n"
+        f"🎯 Очередь стрелять: {get_mention(next_player['id'], next_player['name'])}\n\n"
+        f"<i>Жмите кнопку, чтобы выстрелить:</i>"
+    )
+    await call.message.answer(text, reply_markup=roulette_shoot_keyboard(game_id), parse_mode="HTML")
 
 
 @dp.message(Command("ref"))
@@ -549,7 +792,7 @@ async def cmd_profile(message: Message):
         if clan:
             clan_tag = f"<b>[{html.escape(clan['name'])}]</b>"
 
-    dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
+    dep_status = "⭐ Депозит" if has_dep else "⏳ Без депозита"
 
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(user_id, name)}\n"
@@ -1430,7 +1673,7 @@ async def cmd_dice(message: Message, command: CommandObject):
             pass
         text = (
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
-            f"💰 <b>Возврат:</b> <code>+{bet} 💰</code>"
+            f"💰 <b>Возврат ставки:</b> <code>+{bet} 💰</code>"
         )
         await send_game_result(message, "draw", text)
 
@@ -2119,6 +2362,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
+        BotCommand(command="roulette", description="Русская Рулетка (выбывание + мут 2ч) 🔫"),
         BotCommand(command="dice", description="Кубик против бота (от 100 💰) 🤖"),
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
