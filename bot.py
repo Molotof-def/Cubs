@@ -4,7 +4,7 @@ import logging
 import random
 import html
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, Optional, List
 
 import asyncpg
@@ -39,7 +39,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# 🖼 Картинки для исходов игр (можно заменить на свои ссылки)
+# Картинки для исходов игр
 IMG_WIN = "https://img.freepik.com/free-vector/you-win-lettering-pop-art_175838-498.jpg"
 IMG_LOSS = "https://img.freepik.com/free-vector/game-over-effect_23-2148101569.jpg"
 IMG_DRAW = "https://img.freepik.com/free-vector/versus-vs-letters-competition-background_1017-26284.jpg"
@@ -63,11 +63,10 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
-    """Безопасная отправка картинки с результатом игры"""
     try:
         await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Не удалось отправить фото: {e}. Отправка текстового результата.")
+        logging.warning(f"Не удалось отправить фото: {e}. Отправка текстом.")
         await message.answer(text=caption, parse_mode="HTML", reply_markup=reply_markup)
 
 
@@ -142,7 +141,9 @@ class Database:
                     wins INT DEFAULT 0,
                     losses INT DEFAULT 0,
                     draws INT DEFAULT 0,
-                    warns INT DEFAULT 0
+                    warns INT DEFAULT 0,
+                    has_deposited BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS clans (
                     clan_id SERIAL PRIMARY KEY,
@@ -159,6 +160,16 @@ class Database:
                     target_username TEXT,
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS user_quests (
+                    user_id BIGINT PRIMARY KEY,
+                    quest_date DATE,
+                    bot_games INT DEFAULT 0,
+                    bot_claimed BOOLEAN DEFAULT FALSE,
+                    duels_played INT DEFAULT 0,
+                    duels_claimed BOOLEAN DEFAULT FALSE,
+                    ladder_steps INT DEFAULT 0,
+                    ladder_claimed BOOLEAN DEFAULT FALSE
                 );
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
@@ -179,6 +190,8 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS clan_id INT DEFAULT NULL;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS has_deposited BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS stars_amount INT DEFAULT 0;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS target_username TEXT DEFAULT '';
             """)
@@ -207,7 +220,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, clan_id FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, clan_id, has_deposited, created_at FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -243,7 +256,50 @@ class Database:
                     except Exception:
                         pass
         except Exception as e:
-            logging.error(f"Error in process_referral_loss: {e}")
+            logging.error(f"Error in referral processing: {e}")
+
+    # ================= КВЕСТЫ =================
+    async def get_or_reset_quests(self, user_id: int):
+        today = date.today()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM user_quests WHERE user_id = $1", user_id)
+            if not row or row["quest_date"] != today:
+                await conn.execute("""
+                    INSERT INTO user_quests (user_id, quest_date, bot_games, bot_claimed, duels_played, duels_claimed, ladder_steps, ladder_claimed)
+                    VALUES ($1, $2, 0, FALSE, 0, FALSE, 0, FALSE)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        quest_date = EXCLUDED.quest_date,
+                        bot_games = 0, bot_claimed = FALSE,
+                        duels_played = 0, duels_claimed = FALSE,
+                        ladder_steps = 0, ladder_claimed = FALSE
+                """, user_id, today)
+                row = await conn.fetchrow("SELECT * FROM user_quests WHERE user_id = $1", user_id)
+            return dict(row)
+
+    async def add_quest_progress(self, user_id: int, quest_type: str, amount: int = 1):
+        try:
+            await self.get_or_reset_quests(user_id)
+            col = "bot_games" if quest_type == "bot" else ("duels_played" if quest_type == "duel" else "ladder_steps")
+            async with self.pool.acquire() as conn:
+                await conn.execute(f"UPDATE user_quests SET {col} = {col} + $1 WHERE user_id = $2", amount, user_id)
+        except Exception as e:
+            logging.error(f"Error adding quest progress: {e}")
+
+    async def claim_quest_reward(self, user_id: int, quest_type: str) -> tuple[bool, str]:
+        q = await self.get_or_reset_quests(user_id)
+        rewards = {"bot": (5, 100, "bot_games", "bot_claimed"), "duel": (3, 150, "duels_played", "duels_claimed"), "ladder": (3, 200, "ladder_steps", "ladder_claimed")}
+        req_count, reward, count_col, claimed_col = rewards[quest_type]
+
+        if q[claimed_col]:
+            return False, "❌ Вы уже забрали награду за этот квест сегодня!"
+        if q[count_col] < req_count:
+            return False, f"❌ Квест ещё не выполнен! ({q[count_col]}/{req_count})"
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"UPDATE user_quests SET {claimed_col} = TRUE WHERE user_id = $1", user_id)
+            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
+
+        return True, f"🎉 <b>Награда получена: +{reward} 💰!</b>"
 
     # ================= КЛАНЫ =================
     async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
@@ -397,14 +453,20 @@ def withdraw_admin_keyboard(req_id: str):
     return builder.as_markup()
 
 
-LADDER_STEPS = {
-    0: 1.0,
-    1: 1.3,
-    2: 1.8,
-    3: 2.5,
-    4: 4.0,
-    5: 7.5
-}
+def quests_keyboard(q: dict):
+    builder = InlineKeyboardBuilder()
+    b_txt = "✅ Забрано" if q["bot_claimed"] else ("🎁 Забрать 100 💰" if q["bot_games"] >= 5 else f"⏳ {q['bot_games']}/5")
+    d_txt = "✅ Забрано" if q["duels_claimed"] else ("🎁 Забрать 150 💰" if q["duels_played"] >= 3 else f"⏳ {q['duels_played']}/3")
+    l_txt = "✅ Забрано" if q["ladder_claimed"] else ("🎁 Забрать 200 💰" if q["ladder_steps"] >= 3 else f"⏳ {q['ladder_steps']}/3")
+
+    builder.button(text=f"1. Игры с ботом: {b_txt}", callback_data="claim_q_bot")
+    builder.button(text=f"2. Дуэли 1v1: {d_txt}", callback_data="claim_q_duel")
+    builder.button(text=f"3. Лесенка: {l_txt}", callback_data="claim_q_ladder")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+LADDER_STEPS = {0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5}
 
 
 def render_ladder(current_step: int) -> str:
@@ -456,11 +518,10 @@ async def cmd_start(message: Message, command: CommandObject):
         f"📉 <code>/under [ставка]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>/even [ставка]</code> — Чётное число\n"
         f"🎲 <code>/odd [ставка]</code> — Нечётное число\n\n"
-        f"🏰 <b>Кланы и Социалка:</b>\n"
+        f"🎯 <b>Задания и Кланы:</b>\n"
+        f"🎯 <code>/quests</code> — Ежедневные задания с наградами\n"
         f"🛡 <code>/clan</code> — карточка клана\n"
         f"🚩 <code>/create_clan [имя]</code> — создать клан (2500 💰)\n"
-        f"👥 <code>/invite_clan</code> (ответом) — пригласить в клан\n"
-        f"💰 <code>/clan_deposit [сумма]</code> — пополнить казну\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
         f"⭐ <b>Вывод Telegram Stars:</b>\n"
         f"📤 <code>/withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
@@ -472,6 +533,43 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+# ================= 🎯 ЕЖЕДНЕВНЫЕ КВЕСТЫ (/quests) =================
+@dp.message(Command("quests"))
+@dp.message(Command("tasks"))
+async def cmd_quests(message: Message):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+    q = await db.get_or_reset_quests(user_id)
+
+    text = (
+        f"🎯 <b>ЕЖЕДНЕВНЫЕ КВЕСТЫ</b>\n\n"
+        f"Выполняйте задания каждый день и забирайте монеты:\n\n"
+        f"1️⃣ <b>Азартный игрок</b> (Игры против бота)\n"
+        f"Прогресс: <code>{q['bot_games']}/5</code> | Награда: <b>100 💰</b>\n\n"
+        f"2️⃣ <b>Гладиатор чата</b> (Дуэли 1v1 с игроками)\n"
+        f"Прогресс: <code>{q['duels_played']}/3</code> | Награда: <b>150 💰</b>\n\n"
+        f"3️⃣ <b>Покоритель высот</b> (Шаги в /ladder)\n"
+        f"Прогресс: <code>{q['ladder_steps']}/3</code> | Награда: <b>200 💰</b>\n\n"
+        f"<i>Нажмите на кнопку ниже, чтобы забрать выполненную награду:</i>"
+    )
+    await message.answer(text, reply_markup=quests_keyboard(q), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("claim_q_"))
+async def cb_claim_quest(call: CallbackQuery):
+    quest_type = call.data.replace("claim_q_", "")
+    ok, msg = await db.claim_quest_reward(call.from_user.id, quest_type)
+    if ok:
+        await call.answer(msg, show_alert=True)
+        q = await db.get_or_reset_quests(call.from_user.id)
+        try:
+            await call.message.edit_reply_markup(reply_markup=quests_keyboard(q))
+        except Exception:
+            pass
+    else:
+        await call.answer(msg, show_alert=True)
 
 
 @dp.message(Command("ref"))
@@ -497,7 +595,7 @@ async def cmd_profile(message: Message):
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         user = await db.get_user(user_id)
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, clan_id = user
+    _, name, balance, turnover, wins, losses, draws, warns, _, clan_id, has_dep, reg_date = user
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
 
@@ -506,6 +604,8 @@ async def cmd_profile(message: Message):
         clan = await db.get_clan(clan_id)
         if clan:
             clan_tag = f"<b>[{html.escape(clan['name'])}]</b>"
+
+    dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
 
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(user_id, name)}\n"
@@ -516,6 +616,7 @@ async def cmd_profile(message: Message):
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
         f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
         f"┣ 📈 <b>Винрейт:</b> <code>{winrate}%</code>\n"
+        f"┣ 💳 <b>Статус вывода:</b> {dep_status}\n"
         f"┗ ⚠️ <b>Варны:</b> <code>{warns}/3</code>"
     )
     await message.answer(text, parse_mode="HTML")
@@ -556,7 +657,7 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
-# ================= ⭐ ВЫВОД TELEGRAM STARS (КУРС 10:1, ОТ 1000 💰) =================
+# ================= ⭐ ВЫВОД STARS (КУРС 10:1, ХОЛД 21 ДЕНЬ) =================
 @dp.message(Command("withdraw"))
 @dp.message(Command("out"))
 async def cmd_withdraw(message: Message, command: CommandObject):
@@ -568,7 +669,8 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             "⭐ <b>Вывод в Telegram Stars</b>\n\n"
             "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
             "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
-            "Формат: <code>/withdraw [монеты] [твой_тег/юзернейм]</code>\n"
+            "🔒 <b>Правило:</b> Если вы не делали депозит через <code>/stars</code>, вывод доступен только спустя <b>21 день</b> после регистрации.\n\n"
+            "Формат: <code>/withdraw [монеты] [твой_тег]</code>\n"
             "<i>Пример:</i> <code>/withdraw 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
         )
@@ -591,6 +693,21 @@ async def cmd_withdraw(message: Message, command: CommandObject):
         bal = user[2] if user else 0
         return await message.answer(
             f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{bal} 💰</code>",
+            parse_mode="HTML"
+        )
+
+    # Проверка на холд 21 день при отсутствии депозита
+    has_deposited = user[10]
+    created_at = user[11] or datetime.now()
+    days_registered = (datetime.now() - created_at).days
+
+    if not has_deposited and days_registered < 21:
+        days_left = 21 - days_registered
+        return await message.answer(
+            f"🔒 <b>Ограничение на вывод!</b>\n\n"
+            f"Вы ни разу не совершали депозит через <code>/stars</code>. Для пользователей без депозита вывод открывается через <b>21 день</b> с момента регистрации.\n\n"
+            f"⏳ Осталось ждать: <b>{days_left} дн.</b>\n"
+            f"💡 <i>Сделайте любое пополнение через <code>/stars</code>, чтобы снять холд навсегда!</i>",
             parse_mode="HTML"
         )
 
@@ -792,6 +909,9 @@ async def cb_ladder_step(call: CallbackQuery):
     game["is_rolling"] = False
     step = game["step"]
     mult = LADDER_STEPS[step]
+
+    # Добавляем прогресс квеста Лесенки
+    await db.add_quest_progress(user_id, "ladder", 1)
 
     # Достигнута вершина (5 ступень x7.5)
     if step >= 5:
@@ -1197,6 +1317,7 @@ async def cmd_dice(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 Бросок {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
     p_msg = await message.answer_dice(emoji="🎲")
@@ -1249,6 +1370,7 @@ async def cmd_double_dice(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)}:</b>", parse_mode="HTML")
     p_d1 = await message.answer_dice(emoji="🎲")
@@ -1310,6 +1432,7 @@ async def cmd_over(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>БОЛЬШЕ (4-6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1352,6 +1475,7 @@ async def cmd_under(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>МЕНЬШЕ (1-3)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1394,6 +1518,7 @@ async def cmd_even(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>ЧЁТНОЕ (2, 4, 6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1436,6 +1561,7 @@ async def cmd_odd(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
+    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>НЕЧЁТНОЕ (1, 3, 5)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1554,6 +1680,10 @@ async def cb_accept_duel(call: CallbackQuery):
     await db.add_turnover(c_id, bet)
     await db.add_turnover(o_id, bet)
 
+    # Прогресс квеста Дуэлей для обоих участников
+    await db.add_quest_progress(c_id, "duel", 1)
+    await db.add_quest_progress(o_id, "duel", 1)
+
     await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{bet} 💰</b>", parse_mode="HTML")
 
     await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
@@ -1643,7 +1773,12 @@ async def process_successful_payment(message: Message):
         coins = int(payload.replace("stars_deposit_", ""))
         await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         await db.change_balance(message.from_user.id, coins)
-        await message.answer(f"🎉 <b>Оплата успешна!</b>\n⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n💰 Зачислено: <b>+{coins} монет</b>", parse_mode="HTML")
+        
+        # Снимаем 21-дневный холд на вывод
+        async with db.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET has_deposited = TRUE WHERE user_id = $1", message.from_user.id)
+
+        await message.answer(f"🎉 <b>Оплата успешна!</b>\n⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n💰 Зачислено: <b>+{coins} монет</b>\n🔓 <b>Холд на вывод снят навсегда!</b>", parse_mode="HTML")
 
 
 # ================= ТОПЫ И ПРОМОКОДЫ =================
@@ -1898,6 +2033,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
+        BotCommand(command="quests", description="Ежедневные задания 🎯"),
         BotCommand(command="clan", description="Мой клан 🛡"),
         BotCommand(command="create_clan", description="Создать клан (2500 💰) 🚩"),
         BotCommand(command="clan_top", description="Топ кланов 🏰"),
