@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import random
 import html
 import uuid
 import re
@@ -10,7 +9,7 @@ from typing import Dict, Optional, List
 
 import asyncpg
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message,
@@ -40,10 +39,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# Кошелек для приёма GRAM / TON
 GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
 
-# Прямые надежные CDN-ссылки без региональных блокировок
 IMG_WIN = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/master-ball.png"
 IMG_LOSS = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/poke-ball.png"
 IMG_DRAW = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/great-ball.png"
@@ -54,7 +51,6 @@ dp = Dispatcher()
 
 # Сессии в оперативной памяти
 active_duels: Dict[str, dict] = {}
-active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
 active_withdraws: Dict[str, dict] = {}
 active_gram_invoices: Dict[str, dict] = {}
@@ -67,7 +63,6 @@ def get_mention(user_id: int, name: Optional[str]) -> str:
 
 
 async def send_game_result(message: Message, result_type: str, caption: str, reply_markup=None):
-    """Отказоустойчивая отправка результата игры с фото"""
     banners = {
         "win": "🏆 <b>ПОБЕДА!</b>\n\n",
         "loss": "💀 <b>ПОРАЖЕНИЕ!</b>\n\n",
@@ -193,16 +188,6 @@ class Database:
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
                 );
-                CREATE TABLE IF NOT EXISTS promo_codes (
-                    code TEXT PRIMARY KEY,
-                    reward INT,
-                    uses_left INT
-                );
-                CREATE TABLE IF NOT EXISTS promo_history (
-                    user_id BIGINT,
-                    code TEXT,
-                    PRIMARY KEY (user_id, code)
-                );
             """)
             await conn.execute("""
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT DEFAULT NULL;
@@ -213,11 +198,6 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS stars_amount INT DEFAULT 0;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS target_username TEXT DEFAULT '';
-            """)
-            await conn.execute("""
-                INSERT INTO promo_codes (code, reward, uses_left) 
-                VALUES ('START', 100, 10) 
-                ON CONFLICT (code) DO NOTHING;
             """)
 
     async def register_user(self, user_id: int, username: str, tg_username: Optional[str] = None, referrer_id: Optional[int] = None):
@@ -306,36 +286,6 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET warns = 0 WHERE user_id = $1", user_id)
 
-    async def create_promo(self, code: str, reward: int, uses: int) -> bool:
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute("INSERT INTO promo_codes (code, reward, uses_left) VALUES ($1, $2, $3)", code.upper(), reward, uses)
-                return True
-            except Exception:
-                return False
-
-    async def activate_promo(self, user_id: int, code: str) -> tuple[bool, str]:
-        code = code.upper()
-        async with self.pool.acquire() as conn:
-            used = await conn.fetchval("SELECT 1 FROM promo_history WHERE user_id = $1 AND code = $2", user_id, code)
-            if used:
-                return False, "❌ Вы уже активировали этот промокод!"
-
-            promo = await conn.fetchrow("SELECT reward, uses_left FROM promo_codes WHERE code = $1", code)
-            if not promo:
-                return False, "❌ Промокод не найден!"
-
-            reward, uses_left = promo["reward"], promo["uses_left"]
-            if uses_left <= 0:
-                return False, "❌ У этого промокода закончились активации!"
-
-            async with conn.transaction():
-                await conn.execute("UPDATE promo_codes SET uses_left = uses_left - 1 WHERE code = $1", code)
-                await conn.execute("INSERT INTO promo_history (user_id, code) VALUES ($1, $2)", user_id, code)
-                await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
-
-            return True, f"🎉 Промокод активирован! Получено: <b>+{reward} 💰</b>"
-
 
 db = Database(DATABASE_URL)
 
@@ -366,12 +316,6 @@ def duel_keyboard(duel_id: str):
     builder.button(text="⚔️ Принять вызов", callback_data=f"ac_{duel_id}")
     builder.button(text="❌ Отклонить", callback_data=f"dc_{duel_id}")
     builder.adjust(2)
-    return builder.as_markup()
-
-
-def check_keyboard(check_id: str, claimed: int, total: int):
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"💰 Забрать ({claimed}/{total})", callback_data=f"ck_{check_id}")
     return builder.as_markup()
 
 
@@ -431,7 +375,7 @@ async def cmd_start(message: Message, command: CommandObject):
     balance = user[2] if user else 0
 
     text = (
-        f"🎲 <b>Добро пожаловать в Dice Club!</b>\n\n"
+        f"🎲 <b>Добро пожаловать в Duel cubes!</b>\n\n"
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
         f"📜 <b>Режимы игр (мин. ставка 100 💰):</b>\n"
@@ -447,11 +391,9 @@ async def cmd_start(message: Message, command: CommandObject):
         f"💎 <code>/gram [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
         f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>/withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
-        f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
-        f"🌧 <code>/rain [сумма] [людей]</code> — денежный дождь\n"
         f"🤝 <code>/ref</code> — реферальная ссылка (3%)\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
-        f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
+        f"👤 <code>/profile</code> | 🏆 <code>/top</code>"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -775,7 +717,7 @@ async def cb_withdraw_approve(call: CallbackQuery):
                 f"✅ <b>Заявка #{req_id} выплачена!</b>\n\n"
                 f"⭐ Вам отправлено: <b>+{stars} Telegram Stars</b>\n"
                 f"👤 На аккаунт: <code>{html.escape(req['target_username'])}</code>\n\n"
-                f"<i>Спасибо за игру в Dice Club!</i>"
+                f"<i>Спасибо за игру в Duel cubes!</i>"
             ),
             parse_mode="HTML"
         )
@@ -891,7 +833,6 @@ async def cb_ladder_step(call: CallbackQuery):
     await asyncio.sleep(4.0)
     val = int(dice_msg.dice.value)
 
-    # Падение (1 или 2)
     if val in [1, 2]:
         bet = game["bet"]
         del active_ladders[user_id]
@@ -908,13 +849,11 @@ async def cb_ladder_step(call: CallbackQuery):
         )
         return await send_game_result(call.message, "loss", res)
 
-    # Успешный шаг (3, 4, 5, 6)
     game["step"] += 1
     game["is_rolling"] = False
     step = game["step"]
     mult = LADDER_STEPS[step]
 
-    # Достигнута вершина (5 ступень x7.5)
     if step >= 5:
         win = int(game["bet"] * mult)
         del active_ladders[user_id]
@@ -974,144 +913,7 @@ async def cb_ladder_cash(call: CallbackQuery):
     await send_game_result(call.message, "win", res)
 
 
-# ================= 🌧 ДЕНЕЖНЫЙ ДОЖДЬ (/rain) =================
-@dp.message(Command("rain"))
-async def cmd_rain(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    if message.chat.type not in ["group", "supergroup"]:
-        return await message.answer("❌ Денежный дождь доступен только в групповых чатах!")
-
-    if not command.args or len(command.args.split()) < 2:
-        return await message.answer("Использование: <code>/rain [сумма] [кол-во_игроков]</code>\nПример: <code>/rain 500 5</code>", parse_mode="HTML")
-
-    args = command.args.split()
-    if not args[0].isdigit() or not args[1].isdigit():
-        return await message.answer("❌ Сумма и количество игроков должны быть числами!")
-
-    total_amount = int(args[0])
-    people_count = int(args[1])
-
-    if total_amount < people_count or people_count <= 0 or total_amount < 100:
-        return await message.answer("❌ Минимальная сумма дождя: 100 💰!")
-
-    user = await db.get_user(user_id)
-    if not user or user[2] < total_amount:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
-
-    chat_id = message.chat.id
-    candidates = [u for u in chat_recent_users.get(chat_id, []) if u != user_id]
-
-    if not candidates:
-        return await message.answer("❌ В чате пока недостаточно активных участников для дождя!")
-
-    selected_count = min(people_count, len(candidates))
-    lucky_users = random.sample(candidates, selected_count)
-    per_person = total_amount // selected_count
-
-    await db.change_balance(user_id, -total_amount)
-
-    mentions_list = []
-    for uid in lucky_users:
-        u_data = await db.get_user(uid)
-        u_name = u_data[1] if u_data else f"ID {uid}"
-        await db.change_balance(uid, per_person)
-        mentions_list.append(f"• {get_mention(uid, u_name)} ➔ <b>+{per_person} 💰</b>")
-
-    text = (
-        f"🌧 <b>ДЕНЕЖНЫЙ ДОЖДЬ В ЧАТЕ!</b> 🌧\n\n"
-        f"👤 Спонсор: {get_mention(user_id, message.from_user.full_name)}\n"
-        f"💰 Раздано: <b>{total_amount} 💰</b> на <b>{selected_count}</b> активных участников!\n\n"
-        f"🎁 <b>Счастливчики:</b>\n" + "\n".join(mentions_list)
-    )
-    await message.answer(text, parse_mode="HTML")
-
-
-# ================= РАЗДАЧИ ЧЕКОВ (/check, /drop) =================
-@dp.message(Command("check"))
-@dp.message(Command("drop"))
-async def cmd_check(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    if not command.args or len(command.args.split()) < 2:
-        return await message.answer("Использование: <code>/check [сумма] [кол-во_человек]</code>", parse_mode="HTML")
-
-    args = command.args.split()
-    if not args[0].isdigit() or not args[1].isdigit():
-        return await message.answer("❌ Сумма и количество человек должны быть числами!", parse_mode="HTML")
-
-    total_amount, people_count = int(args[0]), int(args[1])
-    if total_amount < people_count or people_count <= 0 or total_amount < 100:
-        return await message.answer("❌ Минимальная сумма чека: 100 💰!", parse_mode="HTML")
-
-    user = await db.get_user(user_id)
-    if not user or user[2] < total_amount:
-        bal = user[2] if user else 0
-        return await message.answer(f"❌ Недостаточно средств! Ваш баланс: <b>{bal} 💰</b>", parse_mode="HTML")
-
-    await db.change_balance(user_id, -total_amount)
-    check_id = uuid.uuid4().hex[:8]
-    per_person = total_amount // people_count
-
-    active_checks[check_id] = {
-        "creator_id": user_id,
-        "creator_name": message.from_user.full_name,
-        "total_amount": total_amount,
-        "per_person": per_person,
-        "total_people": people_count,
-        "claimed_users": []
-    }
-
-    text = (
-        f"🧧 <b>ДЕНЕЖНЫЙ ЧЕК В ЧАТЕ!</b>\n\n"
-        f"👤 Создатель: {get_mention(user_id, message.from_user.full_name)}\n"
-        f"💰 Общая сумма: <b>{total_amount} 💰</b>\n"
-        f"👥 Количество активаций: <b>{people_count}</b> (по <b>{per_person} 💰</b> каждому)\n\n"
-        f"<i>Жми на кнопку ниже, чтобы забрать!</i>"
-    )
-    await message.answer(text, reply_markup=check_keyboard(check_id, 0, people_count), parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("ck_"))
-async def cb_claim_check(call: CallbackQuery):
-    check_id = call.data.replace("ck_", "")
-    user_id = call.from_user.id
-
-    if check_id not in active_checks:
-        return await call.answer("❌ Этот чек уже полностью разобран!", show_alert=True)
-
-    check = active_checks[check_id]
-    if user_id in check["claimed_users"]:
-        return await call.answer("❌ Вы уже забрали эту раздачу!", show_alert=True)
-
-    if not await check_subscription(user_id):
-        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы забирать чеки!", show_alert=True)
-
-    await db.register_user(user_id, call.from_user.full_name, call.from_user.username)
-    check["claimed_users"].append(user_id)
-    reward = check["per_person"]
-    await db.change_balance(user_id, reward)
-
-    claimed_count = len(check["claimed_users"])
-    total_people = check["total_people"]
-
-    await call.answer(f"🎉 Вы забрали +{reward} 💰!", show_alert=True)
-
-    if claimed_count >= total_people:
-        del active_checks[check_id]
-        await call.message.edit_text(
-            f"🧧 <b>ЧЕК ПОЛНОСТЬЮ РАЗОБРАН!</b>\n\n"
-            f"👤 Создатель: {get_mention(check['creator_id'], check['creator_name'])}\n"
-            f"💰 Раздал: <b>{check['total_amount']} 💰</b> на <b>{total_people}</b> человек!",
-            parse_mode="HTML"
-        )
-    else:
-        await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
-
-
-# ================= ОДИНОЧНЫЕ ИГРЫ (100% ГАРАНТИЯ ВЫВОДА) =================
+# ================= ОДИНОЧНЫЕ ИГРЫ =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -1618,7 +1420,7 @@ async def process_successful_payment(message: Message):
         )
 
 
-# ================= ТОПЫ И ПРОМОКОДЫ =================
+# ================= ТОПЫ =================
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     top = await db.get_top(10)
@@ -1635,35 +1437,6 @@ async def cmd_top(message: Message):
         text += f"{place} {safe_name} — <code>{val} 💰</code>\n"
 
     await message.answer(text, parse_mode="HTML")
-
-
-@dp.message(Command("add_promo"))
-async def cmd_add_promo(message: Message, command: CommandObject):
-    if not await db.is_admin(message.from_user.id):
-        return
-
-    if not command.args or len(command.args.split()) < 3:
-        return await message.answer("Формат: <code>/add_promo [КОД] [НАГРАДА] [КОЛ-ВО]</code>", parse_mode="HTML")
-
-    code, reward_str, uses_str = command.args.split()
-    if not reward_str.isdigit() or not uses_str.isdigit():
-        return await message.answer("❌ Награда и количество должны быть числами!")
-
-    ok = await db.create_promo(code, int(reward_str), int(uses_str))
-    if ok:
-        await message.answer(f"✅ Промокод <code>{code.upper()}</code> на <b>{reward_str} 💰</b> создан!", parse_mode="HTML")
-    else:
-        await message.answer("❌ Такой промокод уже существует!")
-
-
-@dp.message(Command("promo"))
-async def cmd_promo(message: Message, command: CommandObject):
-    if not command.args:
-        return await message.answer("Формат: <code>/promo [КОД]</code> (например: <code>/promo START</code>)", parse_mode="HTML")
-
-    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-    _, msg = await db.activate_promo(message.from_user.id, command.args.strip())
-    await message.answer(msg, parse_mode="HTML")
 
 
 # ================= АДМИНИСТРИРОВАНИЕ И МОДЕРАЦИЯ =================
@@ -1877,13 +1650,10 @@ async def on_startup(bot: Bot):
         BotCommand(command="gram", description="Пополнить через Gram / TON 💎"),
         BotCommand(command="stars", description="Пополнить за Stars ⭐"),
         BotCommand(command="withdraw", description="Вывод в Telegram Stars ⭐"),
-        BotCommand(command="check", description="Раздать чек в чат 🧧"),
-        BotCommand(command="rain", description="Денежный дождь в чат 🌧"),
         BotCommand(command="profile", description="Мой профиль и баланс 👤"),
         BotCommand(command="ref", description="Реферальная ссылка (+3%) 🤝"),
         BotCommand(command="pay", description="Передать монеты 💸"),
         BotCommand(command="top", description="Топ богачей 🏆"),
-        BotCommand(command="promo", description="Активировать промокод 🎟"),
     ]
     try:
         await bot.set_my_commands(commands)
