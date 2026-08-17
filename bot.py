@@ -39,10 +39,11 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# Картинки для исходов игр
-IMG_WIN = "https://img.freepik.com/free-vector/you-win-lettering-pop-art_175838-498.jpg"
-IMG_LOSS = "https://img.freepik.com/free-vector/game-over-effect_23-2148101569.jpg"
-IMG_DRAW = "https://img.freepik.com/free-vector/versus-vs-letters-competition-background_1017-26284.jpg"
+# 🖼 Надежные высококачественные ссылки на картинки
+IMG_WIN = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=800&auto=format&fit=crop&q=80"
+IMG_LOSS = "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=800&auto=format&fit=crop&q=80"
+IMG_DRAW = "https://images.unsplash.com/photo-1511193311914-0346f16efe90?w=800&auto=format&fit=crop&q=80"
+IMG_THRONE = "https://images.unsplash.com/photo-1589829545856-d10d557cf95f?w=800&auto=format&fit=crop&q=80"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
@@ -54,6 +55,7 @@ active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
 active_clan_invites: Dict[str, dict] = {}
 active_withdraws: Dict[str, dict] = {}
+chat_thrones: Dict[int, dict] = {}  # Царь горы для каждого чата
 chat_recent_users: Dict[int, List[int]] = {}
 
 
@@ -63,10 +65,10 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
+    """Отправка карточки с фото либо текстом в случае недоступности CDN"""
     try:
         await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
-    except Exception as e:
-        logging.warning(f"Не удалось отправить фото: {e}. Отправка текстом.")
+    except Exception:
         await message.answer(text=caption, parse_mode="HTML", reply_markup=reply_markup)
 
 
@@ -94,7 +96,7 @@ async def check_subscription(user_id: int) -> bool:
     except Exception as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
-            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Бот должен быть АДМИНИСТРАТОРОМ канала!")
+            logging.error(f"⚠️ Бот должен быть АДМИНИСТРАТОРОМ канала {chat_target}! Пропуск проверки.")
             return True
         logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
@@ -510,6 +512,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
         f"📜 <b>Режимы игр:</b>\n"
+        f"👑 <code>/king [ставка]</code> — Царь Горы (Битва за трон чата) 🔥\n"
         f"⚔️ <code>/duel [ставка]</code> — дуэль 1 на 1 в чате\n"
         f"🎲 <code>/dice [ставка]</code> — бросок против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (х3 за дубль)\n"
@@ -533,6 +536,171 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+# ================= 👑 РЕЖИМ ЦАРЬ ГОРЫ (/king, /throne) =================
+@dp.message(Command("king"))
+@dp.message(Command("throne"))
+async def cmd_king(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if message.chat.type not in ["group", "supergroup"]:
+        return await message.answer("❌ Режим «Царь Горы» доступен только в групповых чатах!")
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    throne = chat_thrones.get(chat_id)
+
+    # Если трон свободен
+    if not throne:
+        bet = 50
+        if command.args and command.args.isdigit():
+            bet = int(command.args)
+        if bet < 50:
+            return await message.answer("❌ Минимальная ставка для захвата трона: <b>50 💰</b>", parse_mode="HTML")
+
+        user = await db.get_user(user_id)
+        if not user or user[2] < bet:
+            return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+        await db.change_balance(user_id, -bet)
+        await db.add_turnover(user_id, bet)
+
+        chat_thrones[chat_id] = {
+            "king_id": user_id,
+            "king_name": message.from_user.full_name,
+            "bank": bet,
+            "defended_count": 0,
+            "taken_at": datetime.now()
+        }
+
+        text = (
+            f"👑 <b>ТРОН ЧАТА ЗАХВАЧЕН!</b>\n\n"
+            f"👑 Новый Царь: {get_mention(user_id, message.from_user.full_name)}\n"
+            f"💰 Казна Трона: <b>{bet} 💰</b>\n"
+            f"🛡 Успешных защит: <b>0</b>\n\n"
+            f"<i>Любой желающий может попытаться свергнуть Царя командой:</i>\n"
+            f"👉 <code>/attack [ставка]</code>"
+        )
+        return await send_game_result(message, IMG_THRONE, text)
+
+    # Если трон уже занят — выводим статус
+    k_id, k_name, bank, defs = throne["king_id"], throne["king_name"], throne["bank"], throne["defended_count"]
+    text = (
+        f"👑 <b>ТЕКУЩИЙ ЦАРЬ ГОРИ</b>\n\n"
+        f"👑 Владыка: {get_mention(k_id, k_name)}\n"
+        f"💰 Банк Трона: <b>{bank} 💰</b>\n"
+        f"🛡 Отбитых атак: <b>{defs}</b>\n\n"
+        f"⚔️ <i>Чтобы бросить вызов и забрать весь банк:</i>\n"
+        f"👉 <code>/attack [ставка от {max(50, bank // 2)}]</code>"
+    )
+    await send_game_result(message, IMG_THRONE, text)
+
+
+@dp.message(Command("attack"))
+async def cmd_attack_throne(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if message.chat.type not in ["group", "supergroup"]:
+        return await message.answer("❌ Битвы за трон доступны только в групповых чатах!")
+
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    throne = chat_thrones.get(chat_id)
+    if not throne:
+        return await message.answer("👑 Трон сейчас свободен! Займите его: <code>/king [ставка]</code>", parse_mode="HTML")
+
+    if throne["king_id"] == user_id:
+        return await message.answer("👑 Вы и так являетесь действующим Царём Горы!")
+
+    min_attack = max(50, throne["bank"] // 2)
+    bet = min_attack
+    if command.args and command.args.isdigit():
+        bet = int(command.args)
+
+    if bet < min_attack:
+        return await message.answer(f"❌ Минимальная ставка для атаки на этот трон: <b>{min_attack} 💰</b>", parse_mode="HTML")
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    k_id, k_name = throne["king_id"], throne["king_name"]
+
+    await message.answer(
+        f"⚔️ {get_mention(user_id, message.from_user.full_name)} бросил вызов Царю {get_mention(k_id, k_name)} за Трон!\n"
+        f"Ставка атаки: <b>{bet} 💰</b>",
+        parse_mode="HTML"
+    )
+
+    await message.answer(f"🔴 Бросает Претендент {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
+    att_dice = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    att_val = att_dice.dice.value
+
+    await message.answer(f"👑 Бросает Царь {get_mention(k_id, k_name)}:", parse_mode="HTML")
+    king_dice = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    king_val = king_dice.dice.value
+
+    # Претендент победил — свержение!
+    if att_val > king_val:
+        win_bank = throne["bank"] + bet
+        await db.change_balance(user_id, win_bank)
+        await db.record_game(user_id, "win")
+        await db.record_game(k_id, "loss")
+
+        # Новый царь
+        chat_thrones[chat_id] = {
+            "king_id": user_id,
+            "king_name": message.from_user.full_name,
+            "bank": bet,
+            "defended_count": 0,
+            "taken_at": datetime.now()
+        }
+
+        res = (
+            f"👑 <b>СВЕРЖЕНИЕ ЦАРЯ!</b> ({att_val} > {king_val})\n\n"
+            f"🎉 Претендент {get_mention(user_id, message.from_user.full_name)} одолел {get_mention(k_id, k_name)}!\n"
+            f"💰 Забран весь куш трона: <b>+{win_bank} 💰</b>\n"
+            f"🏰 Теперь он новый Царь Горы!"
+        )
+        return await send_game_result(message, IMG_WIN, res)
+
+    # Царь отбился — пополнение банка трона!
+    elif king_val > att_val:
+        throne["bank"] += bet
+        throne["defended_count"] += 1
+        await db.record_game(k_id, "win")
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+
+        res = (
+            f"🛡 <b>ЦАРЬ ОТБИЛ АТАКУ!</b> ({king_val} > {att_val})\n\n"
+            f"👑 {get_mention(k_id, k_name)} удержал власть против {get_mention(user_id, message.from_user.full_name)}!\n"
+            f"💰 Казна Трона пополнена на <b>+{bet} 💰</b> (Всего: <b>{throne['bank']} 💰</b>)"
+        )
+        return await send_game_result(message, IMG_LOSS, res)
+
+    # Ничья
+    else:
+        await db.change_balance(user_id, bet)
+        await db.record_game(user_id, "draw")
+        await db.record_game(k_id, "draw")
+        res = (
+            f"⚖️ <b>РАВНЫЙ БОЙ НА ТРОНЕ! ({att_val} = {king_val})</b>\n\n"
+            f"Царь остаётся на троне, ставка возвращена претенденту."
+        )
+        return await send_game_result(message, IMG_DRAW, res)
 
 
 # ================= 🎯 ЕЖЕДНЕВНЫЕ КВЕСТЫ (/quests) =================
@@ -696,7 +864,6 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
-    # Проверка на холд 21 день при отсутствии депозита
     has_deposited = user[10]
     created_at = user[11] or datetime.now()
     days_registered = (datetime.now() - created_at).days
@@ -795,7 +962,7 @@ async def cb_withdraw_reject(call: CallbackQuery):
     req_id = call.data.replace("wd_no_", "")
 
     async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        req = await conn.fetchrow("SELECT user_id, amount, target_username, status FROM withdraw_requests WHERE req_id = $1", req_id)
         if not req or req["status"] != "pending":
             return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
 
@@ -910,7 +1077,6 @@ async def cb_ladder_step(call: CallbackQuery):
     step = game["step"]
     mult = LADDER_STEPS[step]
 
-    # Добавляем прогресс квеста Лесенки
     await db.add_quest_progress(user_id, "ladder", 1)
 
     # Достигнута вершина (5 ступень x7.5)
@@ -1680,7 +1846,6 @@ async def cb_accept_duel(call: CallbackQuery):
     await db.add_turnover(c_id, bet)
     await db.add_turnover(o_id, bet)
 
-    # Прогресс квеста Дуэлей для обоих участников
     await db.add_quest_progress(c_id, "duel", 1)
     await db.add_quest_progress(o_id, "duel", 1)
 
@@ -2029,6 +2194,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
+        BotCommand(command="king", description="Царь Горы (Трон чата) 👑"),
         BotCommand(command="dice", description="Кубик против бота 🤖"),
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
