@@ -41,11 +41,11 @@ WEBHOOK_PATH = "/webhook"
 
 GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
 
-IMG_WIN = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/master-ball.png"
-IMG_LOSS = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/poke-ball.png"
+# ВСТАВЬТЕ СЮДА ВАШИ ССЫЛКИ RAW С GITHUB
+IMG_WIN = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.png"
+IMG_LOSS = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.png"
 IMG_DRAW = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/great-ball.png"
 
-# Мотивационные цитаты при серии поражений
 MOTIVATIONAL_QUOTES = [
     "🔥 <i>«Тот, кто никогда не падал, никогда не поднимался. Сделай паузу и верни своё!»</i>",
     "💪 <i>«Серия неудач — это лишь разбег перед крупным триумфом. Главное — холодная голова.»</i>",
@@ -86,7 +86,7 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
         elif result_type == "loss":
             user_loss_streaks[user_id] = user_loss_streaks.get(user_id, 0) + 1
             if user_loss_streaks[user_id] >= 3:
-                quote_text = f"\n\n💬 <b>Слова поддержки (3+ поражения подряд):</b>\n{random.choice(MOTIVATIONAL_QUOTES)}"
+                quote_text = f"\n\n💬 <b>Слова поддержки:</b>\n{random.choice(MOTIVATIONAL_QUOTES)}"
 
     full_caption = banners.get(result_type, "") + caption + quote_text
     img_map = {"win": IMG_WIN, "loss": IMG_LOSS, "draw": IMG_DRAW}
@@ -102,7 +102,7 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
             )
             return
         except Exception as e:
-            logging.warning(f"Ошибка загрузки фото ({e}), переключение на текстовый режим.")
+            logging.warning(f"Ошибка отправки фото ({e}), переключение на текст.")
 
     try:
         await message.answer(text=full_caption, parse_mode="HTML", reply_markup=reply_markup)
@@ -380,12 +380,7 @@ def ladder_keyboard(user_id: int, step: int):
     return builder.as_markup()
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ИГР =================
-def extract_args(text: str) -> List[str]:
-    parts = text.strip().split()
-    return parts[1:] if len(parts) > 1 else []
-
-
+# ================= ОБРАБОТЧИКИ ИГР И ФУНКЦИЙ =================
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -402,22 +397,21 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
         f"📜 <b>Режимы игр (мин. ставка 100 💰):</b>\n"
-        f"<i>(Работает как с «/», так и просто текстом)</i>\n\n"
-        f"⚔️ <code>duel [ставка]</code> — дуэль 1 на 1 в чате (ответом)\n"
-        f"🎲 <code>dice [ставка]</code> — бросок против бота\n"
-        f"🎲🎲 <code>doubledice [ставка]</code> — 2 кубика (х3 за дубль)\n"
-        f"🚀 <code>ladder [ставка]</code> — Кубическая Лесенка (до x7.5)\n"
-        f"📈 <code>over [ставка]</code> — Больше (4, 5, 6)\n"
-        f"📉 <code>under [ставка]</code> — Меньше (1, 2, 3)\n"
-        f"⚖️ <code>even [ставка]</code> — Чётное число\n"
-        f"🎲 <code>odd [ставка]</code> — Нечётное число\n\n"
+        f"⚔️ <code>дуэль [ставка]</code> — дуэль 1 на 1 в чате (ответом)\n"
+        f"🎲 <code>кубик [ставка]</code> — бросок против бота\n"
+        f"🎲🎲 <code>дабл [ставка]</code> — 2 кубика (х3 за дубль)\n"
+        f"🚀 <code>лесенка [ставка]</code> — Кубическая Лесенка (до x7.5)\n"
+        f"📈 <code>больше [ставка]</code> — Больше (4, 5, 6)\n"
+        f"📉 <code>меньше [ставка]</code> — Меньше (1, 2, 3)\n"
+        f"⚖️ <code>четное [ставка]</code> — Чётное число\n"
+        f"🎲 <code>нечетное [ставка]</code> — Нечётное число\n\n"
         f"💳 <b>Пополнение и Вывод:</b>\n"
-        f"💎 <code>gram [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
-        f"⭐ <code>stars [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
-        f"📤 <code>withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
-        f"🤝 <code>ref</code> — реферальная ссылка (3%)\n"
-        f"💸 <code>pay [сумма]</code> (ответом) — передать монеты\n"
-        f"👤 <code>profile</code> | 🏆 <code>top</code>"
+        f"💎 <code>грам [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
+        f"⭐ <code>звезды [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
+        f"📤 <code>вывод [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
+        f"🤝 <code>реф</code> — реферальная ссылка (3%)\n"
+        f"💸 <code>перевод [сумма]</code> (ответом) — передать монеты\n"
+        f"👤 <code>профиль</code> | 🏆 <code>топ</code>"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -662,7 +656,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
     if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Ответьте на сообщение оппонента для вызова на дуэль!")
+        return await message.answer("❌ Ответьте на сообщение игрока для вызова на дуэль!")
 
     opponent = message.reply_to_message.from_user
     challenger = message.from_user
@@ -771,7 +765,7 @@ async def process_pay_cmd(message: Message, args: List[str]):
         return await message.answer("❌ Нельзя переводить монеты самому себе!")
 
     if not args or not args[0].isdigit():
-        return await message.answer("❌ Формат: <code>pay 100</code>", parse_mode="HTML")
+        return await message.answer("❌ Формат: <code>перевод 100</code>", parse_mode="HTML")
 
     amount = int(args[0])
     if amount <= 0:
@@ -803,7 +797,7 @@ async def process_gram_cmd(message: Message, args: List[str]):
         try:
             gram_amount = float(args[0].replace(",", "."))
         except ValueError:
-            return await message.answer("❌ Укажите количество Gram: <code>gram 5</code>", parse_mode="HTML")
+            return await message.answer("❌ Укажите количество Gram: <code>грам 5</code>", parse_mode="HTML")
 
     if gram_amount < 0.1:
         return await message.answer("❌ Минимальная сумма пополнения: 0.1 Gram!")
@@ -850,9 +844,9 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             "⭐ <b>Вывод в Telegram Stars</b>\n\n"
             "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
             "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
-            "🔒 <b>Защита от Refund:</b> Вывод доступен спустя <b>21 день</b> после последнего пополнения через Stars (на пополнения через <code>gram</code> холд не действует).\n\n"
-            "Формат: <code>withdraw [монеты] [твой_тег]</code>\n"
-            "<i>Пример:</i> <code>withdraw 2000 @durov</code> (получите 200 ⭐)",
+            "🔒 <b>Защита от Refund:</b> Вывод доступен спустя <b>21 день</b> после последнего пополнения через Stars (на пополнения через <code>грам</code> холд не действует).\n\n"
+            "Формат: <code>вывод [монеты] [твой_тег]</code>\n"
+            "<i>Пример:</i> <code>вывод 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
         )
 
@@ -889,7 +883,7 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             f"🔒 <b>Холд безопасности активен!</b>\n\n"
             f"В связи с правилами Telegram Stars Refund вывод средств заморожен на 21 день с момента {reason}.\n\n"
             f"⏳ Осталось дней холда: <b>{days_left} дн.</b>\n"
-            f"💡 <i>Пополняйте баланс через <code>gram</code> без каких-либо холдов и задержек!</i>",
+            f"💡 <i>Пополняйте баланс через <code>грам</code> без каких-либо холдов и задержек!</i>",
             parse_mode="HTML"
         )
 
@@ -929,7 +923,7 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
                 parse_mode="HTML"
             )
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление админу о выводе: {e}")
+            logging.error(f"Не удалось отправить уведомление админу: {e}")
 
 
 async def process_stars_cmd(message: Message, args: List[str]):
@@ -951,7 +945,7 @@ async def process_stars_cmd(message: Message, args: List[str]):
     )
 
 
-# ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ (С И БЕЗ СЛЭША) =================
+# ================= МАРШРУТИЗАТОР ВСЕХ КОМАНД =================
 @dp.message(F.text)
 async def handle_all_text_commands(message: Message):
     text = message.text.strip()
@@ -960,34 +954,36 @@ async def handle_all_text_commands(message: Message):
 
     parts = text.split()
     cmd_raw = parts[0].lower()
-    
-    # Убираем слеш и тег бота (например /dice@mybot -> dice)
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
 
-    # Роутинг команд
-    if cmd == "start":
+    # Старт
+    if cmd in ["start", "старт", "меню", "menu"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
-    elif cmd in ["dice", "кубик", "кость"]:
+    
+    # Игры
+    elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
         await process_dice_cmd(message, args)
-    elif cmd in ["doubledice", "2dice", "дабл"]:
+    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "двойной"]:
         await process_doubledice_cmd(message, args)
-    elif cmd in ["ladder", "лесенка"]:
+    elif cmd in ["ladder", "лесенка", "лестница"]:
         await process_ladder_cmd(message, args)
-    elif cmd in ["duel", "дуэль"]:
+    elif cmd in ["duel", "дуэль", "бой"]:
         await process_duel_cmd(message, args)
-    elif cmd in ["over", "больше"]:
+    elif cmd in ["over", "больше", "бол"]:
         await process_simple_bet(message, args, "over")
-    elif cmd in ["under", "меньше"]:
+    elif cmd in ["under", "меньше", "мен"]:
         await process_simple_bet(message, args, "under")
-    elif cmd in ["even", "чет", "четное"]:
+    elif cmd in ["even", "чет", "четное", "чёт", "чётное"]:
         await process_simple_bet(message, args, "even")
-    elif cmd in ["odd", "нечет", "нечетное"]:
+    elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
         await process_simple_bet(message, args, "odd")
-    elif cmd in ["profile", "профиль", "баланс", "stats"]:
+    
+    # Личный кабинет и финансы
+    elif cmd in ["profile", "профиль", "баланс", "stats", "стата"]:
         await process_profile_cmd(message)
-    elif cmd in ["ref", "реф", "рефералы"]:
+    elif cmd in ["ref", "реф", "рефералы", "друзья"]:
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
         ref_count = await db.get_referrals_count(message.from_user.id)
@@ -998,23 +994,25 @@ async def handle_all_text_commands(message: Message):
             f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
         )
         await message.answer(text_ref, parse_mode="HTML")
-    elif cmd in ["top", "топ", "лидеры"]:
+    elif cmd in ["top", "топ", "лидеры", "богачи"]:
         await process_top_cmd(message)
-    elif cmd in ["pay", "передать", "перевод"]:
+    elif cmd in ["pay", "передать", "перевод", "дать"]:
         await process_pay_cmd(message, args)
-    elif cmd in ["gram", "ton", "тон", "грам"]:
+    elif cmd in ["gram", "ton", "тон", "грам", "крипта"]:
         await process_gram_cmd(message, args)
-    elif cmd in ["stars", "звезды", "донат", "donate"]:
+    elif cmd in ["stars", "звезды", "донат", "donate", "пополнить"]:
         await process_stars_cmd(message, args)
-    elif cmd in ["withdraw", "out", "вывод"]:
+    elif cmd in ["withdraw", "out", "вывод", "снять"]:
         await process_withdraw_cmd(message, args)
-    elif cmd == "give":
+    
+    # Админка
+    elif cmd in ["give", "выдать"]:
         if not await db.is_admin(message.from_user.id):
             return
         if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
             return await message.answer("❌ Ответьте на сообщение игрока для выдачи!")
         if not args:
-            return await message.answer("❌ Укажите сумму: <code>give 1000</code>", parse_mode="HTML")
+            return await message.answer("❌ Укажите сумму: <code>выдать 1000</code>", parse_mode="HTML")
         try:
             amount = int(args[0])
         except ValueError:
@@ -1024,7 +1022,7 @@ async def handle_all_text_commands(message: Message):
         await db.change_balance(target.id, amount)
         verb = "выдал" if amount >= 0 else "забрал"
         await message.answer(f"👑 Администратор {verb} <b>{abs(amount)} 💰</b> у {get_mention(target.id, target.full_name)}!", parse_mode="HTML")
-    elif cmd == "mute":
+    elif cmd in ["mute", "мут"]:
         if not await db.is_admin(message.from_user.id):
             return
         target = message.reply_to_message.from_user if message.reply_to_message else None
@@ -1044,7 +1042,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🔇 {get_mention(target.id, target.full_name)} отправлен в мут на {mins} мин.\n📝 Причина: {reason}", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
-    elif cmd == "unmute":
+    elif cmd in ["unmute", "размут"]:
         if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
             return
         target = message.reply_to_message.from_user
@@ -1067,7 +1065,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🔊 {get_mention(target.id, target.full_name)} размучен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
-    elif cmd == "ban":
+    elif cmd in ["ban", "бан"]:
         if not await db.is_admin(message.from_user.id):
             return
         target_id = None
@@ -1085,7 +1083,7 @@ async def handle_all_text_commands(message: Message):
                 if not target_id:
                     return await message.answer(f"❌ Пользователь <code>{arg}</code> не найден в БД!", parse_mode="HTML")
         if not target_id:
-            return await message.answer("Использование: <code>ban @username</code> или ответом на сообщение.", parse_mode="HTML")
+            return await message.answer("Использование: <code>бан @username</code> или ответом на сообщение.", parse_mode="HTML")
         if target_id == OWNER_ID or await db.is_admin(target_id):
             return await message.answer("❌ Нельзя наказать администратора!")
         try:
@@ -1093,7 +1091,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🛑 {get_mention(target_id, target_name)} забанен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка при бане: {e}")
-    elif cmd == "unban":
+    elif cmd in ["unban", "разбан"]:
         if not await db.is_admin(message.from_user.id):
             return
         target_id = None
@@ -1108,13 +1106,13 @@ async def handle_all_text_commands(message: Message):
                 if not target_id:
                     return await message.answer(f"❌ Пользователь с тегом <code>{arg}</code> не найден в базе данных!", parse_mode="HTML")
         if not target_id:
-            return await message.answer("Использование: <code>unban @username</code> или <code>unban 12345678</code>", parse_mode="HTML")
+            return await message.answer("Использование: <code>разбан @username</code> или <code>разбан 12345678</code>", parse_mode="HTML")
         try:
             await message.chat.unban(user_id=target_id, only_if_banned=True)
             await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка разбана: {e}")
-    elif cmd == "warn":
+    elif cmd in ["warn", "варн", "пред"]:
         if not await db.is_admin(message.from_user.id):
             return
         target = message.reply_to_message.from_user if message.reply_to_message else None
@@ -1133,7 +1131,7 @@ async def handle_all_text_commands(message: Message):
                 await message.answer(f"❌ Ошибка при бане: {e}")
         else:
             await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
-    elif cmd == "unwarn":
+    elif cmd in ["unwarn", "снятьварн", "разварн"]:
         if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
             return
         target = message.reply_to_message.from_user
@@ -1503,7 +1501,7 @@ async def process_successful_payment(message: Message):
             f"🎉 <b>Оплата успешна!</b>\n"
             f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
             f"💰 Зачислено: <b>+{coins} монет</b>\n"
-            f"🔒 <i>Вывод доступен через 21 день (защита Telegram Stars Refund). Пополнения через <code>gram</code> выводятся без ожидания.</i>",
+            f"🔒 <i>Вывод доступен через 21 день (защита Telegram Stars Refund). Пополнения через <code>грам</code> выводятся без ожидания.</i>",
             parse_mode="HTML"
         )
 
