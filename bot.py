@@ -48,7 +48,7 @@ active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
 active_clan_invites: Dict[str, dict] = {}
-# Кэш последних активных пользователей чата (для /rain)
+active_withdraws: Dict[str, dict] = {}
 chat_recent_users: Dict[int, List[int]] = {}
 
 
@@ -81,7 +81,7 @@ async def check_subscription(user_id: int) -> bool:
     except Exception as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
-            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Бот должен быть АДМИНОМ канала!")
+            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Бот должен быть АДМИНИСТРАТОРОМ канала!")
             return True
         logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
@@ -100,7 +100,7 @@ def sub_keyboard():
 @dp.callback_query(F.data == "sub_check_recheck")
 async def cb_recheck_sub(call: CallbackQuery):
     if await check_subscription(call.from_user.id):
-        await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все режимы игры.", parse_mode="HTML")
+        await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все функции.", parse_mode="HTML")
     else:
         await call.answer("❌ Вы ещё не подписались на наш канал!", show_alert=True)
 
@@ -135,6 +135,14 @@ class Database:
                     name TEXT UNIQUE,
                     owner_id BIGINT,
                     treasury BIGINT DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS withdraw_requests (
+                    req_id TEXT PRIMARY KEY,
+                    user_id BIGINT,
+                    amount BIGINT,
+                    details TEXT,
+                    status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS bot_admins (
@@ -211,7 +219,7 @@ class Database:
                 try:
                     await bot.send_message(
                         chat_id=ref_id,
-                        text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал проиграл <code>{lost_amount} 💰</code> в кубиках. Вам начислено 3%: <b>+{reward} 💰</b>",
+                        text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал проиграл <code>{lost_amount} 💰</code>. Вам начислено 3%: <b>+{reward} 💰</b>",
                         parse_mode="HTML"
                     )
                 except Exception:
@@ -361,7 +369,14 @@ def clan_invite_keyboard(invite_id: str):
     return builder.as_markup()
 
 
-# Лесенка: ступени множителей
+def withdraw_admin_keyboard(req_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Выплачено", callback_data=f"wd_ok_{req_id}")
+    builder.button(text="❌ Отклонить (Возврат)", callback_data=f"wd_no_{req_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 LADDER_STEPS = {
     0: 1.0,
     1: 1.3,
@@ -427,10 +442,11 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👥 <code>/invite_clan</code> (ответом) — пригласить в клан\n"
         f"💰 <code>/clan_deposit [сумма]</code> — пополнить казну\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
-        f"🎁 <b>Раздачи и Профиль:</b>\n"
+        f"🎁 <b>Финансы и Вывод:</b>\n"
+        f"📤 <code>/withdraw [сумма] [реквизиты]</code> — вывод (от 1000 💰)\n"
         f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
-        f"🌧 <code>/rain [сумма] [людей]</code> — денежный дождь активным\n"
-        f"🤝 <code>/ref</code> — реферальная ссылка (3%)\n"
+        f"🌧 <code>/rain [сумма] [людей]</code> — денежный дождь\n"
+        f"🤝 <code>/ref</code> — реферальная система (3%)\n"
         f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
@@ -485,7 +501,184 @@ async def cmd_profile(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= 🚀 РЕЖИМ КУБИЧЕСКАЯ ЛЕСЕНКА (/ladder) =================
+@dp.message(Command("pay"))
+async def cmd_pay(message: Message, command: CommandObject):
+    if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
+        return await message.answer("❌ Ответьте этой командой на сообщение игрока!")
+
+    recipient = message.reply_to_message.from_user
+    sender = message.from_user
+
+    if recipient.id == sender.id:
+        return await message.answer("❌ Нельзя переводить монеты самому себе!")
+
+    if not command.args or not command.args.isdigit():
+        return await message.answer("❌ Формат: <code>/pay 50</code>", parse_mode="HTML")
+
+    amount = int(command.args)
+    if amount <= 0:
+        return await message.answer("❌ Сумма перевода должна быть больше 0!")
+
+    await db.register_user(sender.id, sender.full_name, sender.username)
+    await db.register_user(recipient.id, recipient.full_name, recipient.username)
+
+    sender_data = await db.get_user(sender.id)
+    if not sender_data or sender_data[2] < amount:
+        return await message.answer("❌ Недостаточно монет для перевода!")
+
+    await db.change_balance(sender.id, -amount)
+    await db.change_balance(recipient.id, amount)
+
+    await message.answer(
+        f"💸 {get_mention(sender.id, sender.full_name)} перевел <b>{amount} 💰</b> "
+        f"игроку {get_mention(recipient.id, recipient.full_name)}!",
+        parse_mode="HTML"
+    )
+
+
+# ================= 📤 ВЫВОД СРЕДСТВ (ОТ 1000 💰) =================
+@dp.message(Command("withdraw"))
+@dp.message(Command("out"))
+async def cmd_withdraw(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    if not command.args or len(command.args.split(maxsplit=1)) < 2:
+        return await message.answer(
+            "📤 <b>Вывод средств</b>\n\n"
+            "Минимальная сумма для вывода: <b>1000 💰</b>\n"
+            "Формат: <code>/withdraw [сумма] [реквизиты/кошелек/карта]</code>\n\n"
+            "<i>Пример:</i> <code>/withdraw 1500 +79991234567 СБП Т-Банк</code>",
+            parse_mode="HTML"
+        )
+
+    parts = command.args.split(maxsplit=1)
+    if not parts[0].isdigit():
+        return await message.answer("❌ Сумма должна быть числом!")
+
+    amount = int(parts[0])
+    details = parts[1].strip()
+
+    if amount < 1000:
+        return await message.answer(
+            f"❌ <b>Минимальная сумма для вывода: 1000 💰!</b>\nВаша сумма: <code>{amount} 💰</code>",
+            parse_mode="HTML"
+        )
+
+    user = await db.get_user(user_id)
+    if not user or user[2] < amount:
+        bal = user[2] if user else 0
+        return await message.answer(
+            f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{bal} 💰</code>",
+            parse_mode="HTML"
+        )
+
+    await db.change_balance(user_id, -amount)
+    req_id = uuid.uuid4().hex[:8]
+
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO withdraw_requests (req_id, user_id, amount, details, status) VALUES ($1, $2, $3, $4, 'pending')",
+            req_id, user_id, amount, details
+        )
+
+    await message.answer(
+        f"⏳ <b>Заявка на вывод #{req_id} принята!</b>\n\n"
+        f"💰 Сумма: <b>{amount} 💰</b>\n"
+        f"💳 Реквизиты: <code>{html.escape(details)}</code>\n\n"
+        f"<i>Средства списаны с баланса. Ожидайте обработки администратором.</i>",
+        parse_mode="HTML"
+    )
+
+    if OWNER_ID:
+        admin_text = (
+            f"🚨 <b>НОВАЯ ЗАЯВКА НА ВЫВОД #{req_id}</b>\n\n"
+            f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)} (ID: <code>{user_id}</code>)\n"
+            f"💰 Сумма: <b>{amount} 💰</b>\n"
+            f"💳 Реквизиты: <code>{html.escape(details)}</code>"
+        )
+        try:
+            await bot.send_message(
+                chat_id=OWNER_ID,
+                text=admin_text,
+                reply_markup=withdraw_admin_keyboard(req_id),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу о выводе: {e}")
+
+
+@dp.callback_query(F.data.startswith("wd_ok_"))
+async def cb_withdraw_approve(call: CallbackQuery):
+    if not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Нет прав!", show_alert=True)
+
+    req_id = call.data.replace("wd_ok_", "")
+    
+    async with db.pool.acquire() as conn:
+        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        if not req or req["status"] != "pending":
+            return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
+
+        await conn.execute("UPDATE withdraw_requests SET status = 'approved' WHERE req_id = $1", req_id)
+
+    try:
+        await bot.send_message(
+            chat_id=req["user_id"],
+            text=(
+                f"✅ <b>Заявка на вывод #{req_id} успешно выполнена!</b>\n\n"
+                f"💰 Выплачено: <b>{req['amount']} 💰</b>\n"
+                f"💳 На реквизиты: <code>{html.escape(req['details'])}</code>\n\n"
+                f"<i>Спасибо за игру!</i>"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await call.message.edit_text(
+        f"{call.message.text}\n\n<b>✅ СТАТУС: Выплачено администратором {get_mention(call.from_user.id, call.from_user.full_name)}</b>",
+        parse_mode="HTML"
+    )
+    await call.answer("✅ Выплата подтверждена!")
+
+
+@dp.callback_query(F.data.startswith("wd_no_"))
+async def cb_withdraw_reject(call: CallbackQuery):
+    if not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Нет прав!", show_alert=True)
+
+    req_id = call.data.replace("wd_no_", "")
+
+    async with db.pool.acquire() as conn:
+        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        if not req or req["status"] != "pending":
+            return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
+
+        await conn.execute("UPDATE withdraw_requests SET status = 'rejected' WHERE req_id = $1", req_id)
+        await db.change_balance(req["user_id"], req["amount"])
+
+    try:
+        await bot.send_message(
+            chat_id=req["user_id"],
+            text=(
+                f"❌ <b>Заявка на вывод #{req_id} отклонена!</b>\n\n"
+                f"💰 Сумма <b>{req['amount']} 💰</b> возвращена на ваш игровой баланс.\n"
+                f"<i>Проверьте правильность реквизитов и повторите попытку.</i>"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await call.message.edit_text(
+        f"{call.message.text}\n\n<b>❌ СТАТУС: Отклонено (монеты возвращены игроку)</b>",
+        parse_mode="HTML"
+    )
+    await call.answer("❌ Заявка отклонена, средства возвращены.")
+
+
+# ================= 🚀 КУБИЧЕСКАЯ ЛЕСЕНКА (/ladder) =================
 @dp.message(Command("ladder"))
 async def cmd_ladder(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -522,7 +715,7 @@ async def cmd_ladder(message: Message, command: CommandObject):
         f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)}\n"
         f"💰 Ставка: <b>{bet} 💰</b>\n\n"
         f"{render_ladder(0)}\n\n"
-        f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и проигрыш!</i>"
+        f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и сгорание ставки!</i>"
     )
     await message.answer(text, reply_markup=ladder_keyboard(user_id, 0), parse_mode="HTML")
 
@@ -542,7 +735,7 @@ async def cb_ladder_step(call: CallbackQuery):
 
     game = active_ladders[user_id]
     if game.get("is_rolling"):
-        return await call.answer("⏳ Кубик уже брошен, ждите!", show_alert=False)
+        return await call.answer("⏳ Кубик уже брошен, подождите!", show_alert=False)
 
     game["is_rolling"] = True
     await call.message.edit_reply_markup(reply_markup=None)
@@ -579,6 +772,7 @@ async def cb_ladder_step(call: CallbackQuery):
         del active_ladders[user_id]
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
+
         res = (
             f"👑 <b>ВЕРШИНА ПОКОРЕНА! ВЫ ПРОШЛИ ВСЮ ЛЕСЕНКУ!</b>\n\n"
             f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
@@ -955,7 +1149,7 @@ async def cb_claim_check(call: CallbackQuery):
         await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
 
 
-# ================= ОДИНОЧНЫЕ КУБИКИ =================
+# ================= ОДИНОЧНЫЕ КУБИКИ (ГАРАНТИРОВАННЫЙ ВЫВОД) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -1567,7 +1761,7 @@ async def cmd_ban(message: Message, command: CommandObject):
             target_id = int(arg)
         else:
             target_id = await db.get_user_id_by_username(arg)
-        if not target_id:
+            if not target_id:
                 return await message.answer(f"❌ Пользователь <code>{arg}</code> не найден в БД!", parse_mode="HTML")
 
     if not target_id:
@@ -1607,7 +1801,7 @@ async def cmd_unban(message: Message, command: CommandObject):
         await message.chat.unban(user_id=target_id, only_if_banned=True)
         await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка разбана: {e}")
+        await message.answer(f"❌ Ошибка разбана (проверьте права бота): {e}")
 
 
 @dp.message(Command("warn"))
@@ -1662,6 +1856,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="under", description="Меньше (1-3) 📉"),
         BotCommand(command="even", description="Чётное число ⚖️"),
         BotCommand(command="odd", description="Нечётное число 🎲"),
+        BotCommand(command="withdraw", description="Вывод средств (от 1000 💰) 📤"),
         BotCommand(command="check", description="Раздать чек в чат 🧧"),
         BotCommand(command="rain", description="Денежный дождь в чат 🌧"),
         BotCommand(command="profile", description="Мой профиль и баланс 👤"),
