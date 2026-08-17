@@ -34,9 +34,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL в Render.")
 
-# Юзернейм или ID канала для обязательной подписки
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
-
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
@@ -49,6 +47,7 @@ dp = Dispatcher()
 active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_miners: Dict[int, dict] = {}
+active_clan_invites: Dict[str, dict] = {}
 
 
 def get_mention(user_id: int, name: str) -> str:
@@ -58,7 +57,7 @@ def get_mention(user_id: int, name: str) -> str:
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@DuelCubesChannel", "none", ""]:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", ""]:
         return True
     try:
         chat_id = REQUIRED_CHANNEL if REQUIRED_CHANNEL.startswith("@") or REQUIRED_CHANNEL.startswith("-100") else f"@{REQUIRED_CHANNEL}"
@@ -69,8 +68,7 @@ async def check_subscription(user_id: int) -> bool:
             return getattr(member, "is_member", False)
         return False
     except Exception as e:
-        logging.error(f"Ошибка проверки подписки в канале {REQUIRED_CHANNEL}: {e}")
-        # Если бот не админ в канале, не крашим бота, но пишем ошибку в логи
+        logging.error(f"Ошибка проверки подписки: {e}")
         return False
 
 
@@ -99,12 +97,20 @@ class Database:
                     username TEXT,
                     tg_username TEXT,
                     referrer_id BIGINT DEFAULT NULL,
+                    clan_id INT DEFAULT NULL,
                     balance BIGINT DEFAULT 0,
                     turnover BIGINT DEFAULT 0,
                     wins INT DEFAULT 0,
                     losses INT DEFAULT 0,
                     draws INT DEFAULT 0,
                     warns INT DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS clans (
+                    clan_id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE,
+                    owner_id BIGINT,
+                    treasury BIGINT DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
@@ -120,13 +126,13 @@ class Database:
                     PRIMARY KEY (user_id, code)
                 );
             """)
-            # Безопасная автомиграция
+            # Автомиграция колонок
             await conn.execute("""
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS clan_id INT DEFAULT NULL;
             """)
-            # Стартовый промокод
             await conn.execute("""
                 INSERT INTO promo_codes (code, reward, uses_left) 
                 VALUES ('START', 100, 10) 
@@ -152,7 +158,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, clan_id FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -186,6 +192,43 @@ class Database:
                     )
                 except Exception:
                     pass
+ # ================= МЕТОДЫ КЛАНОВ =================
+    async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
+        async with self.pool.acquire() as conn:
+            try:
+                clan_id = await conn.fetchval(
+                    "INSERT INTO clans (name, owner_id, treasury) VALUES ($1, $2, 0) RETURNING clan_id",
+                    name, owner_id
+                )
+                await conn.execute("UPDATE users SET clan_id = $1 WHERE user_id = $2", clan_id, owner_id)
+                return clan_id
+            except Exception:
+                return None
+
+    async def get_clan(self, clan_id: int):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("SELECT clan_id, name, owner_id, treasury FROM clans WHERE clan_id = $1", clan_id)
+
+    async def get_clan_members_count(self, clan_id: int) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("SELECT COUNT(*) FROM users WHERE clan_id = $1", clan_id) or 0
+
+    async def add_to_clan_treasury(self, clan_id: int, amount: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE clans SET treasury = treasury + $1 WHERE clan_id = $2", amount, clan_id)
+
+    async def set_user_clan(self, user_id: int, clan_id: Optional[int]):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET clan_id = $1 WHERE user_id = $2", clan_id, user_id)
+
+    async def delete_clan(self, clan_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET clan_id = NULL WHERE clan_id = $1", clan_id)
+            await conn.execute("DELETE FROM clans WHERE clan_id = $1", clan_id)
+
+    async def get_top_clans(self, limit=10):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("SELECT name, treasury FROM clans ORDER BY treasury DESC LIMIT $1", limit)
 
     async def get_referrals_count(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
@@ -250,7 +293,6 @@ class Database:
 db = Database(DATABASE_URL)
 
 
-# Безопасный middleware для регистрации username
 @dp.message.outer_middleware()
 async def auto_register_middleware(handler, event: Message, data: dict):
     if event.from_user and not event.from_user.is_bot and db.pool:
@@ -273,6 +315,14 @@ def duel_keyboard(duel_id: str):
 def check_keyboard(check_id: str, claimed: int, total: int):
     builder = InlineKeyboardBuilder()
     builder.button(text=f"💰 Забрать ({claimed}/{total})", callback_data=f"ck_{check_id}")
+    return builder.as_markup()
+
+
+def clan_invite_keyboard(invite_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Вступить", callback_data=f"ci_ac_{invite_id}")
+    builder.button(text="❌ Отклонить", callback_data=f"ci_dc_{invite_id}")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -326,10 +376,16 @@ async def cmd_start(message: Message, command: CommandObject):
         f"⚖️ <code>/even [ставка]</code> — Чётное число\n"
         f"🎲 <code>/odd [ставка]</code> — Нечётное число\n"
         f"💣 <code>/miner [ставка]</code> — Кубический сапёр (1x6)\n\n"
-        f"🎁 <b>Социалка и Финансы:</b>\n"
-        f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
-        f"🤝 <code>/ref</code> — реферальная система (3% с проигрышей)\n"
-        f"⭐ <code>/stars [кол-во]</code> — пополнить за Telegram Stars\n"
+        f"🏰 <b>Кланы и Социалка:</b>\n"
+        f"🛡 <code>/clan</code> — информация о клане\n"
+        f"🚩 <code>/create_clan [имя]</code> — создать клан (250 💰)\n"
+        f"👥 <code>/invite_clan</code> (ответом) — пригласить в клан\n"
+        f"💰 <code>/clan_deposit [сумма]</code> — пополнить казну\n"
+        f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
+        f"🎁 <b>Финансы и Профиль:</b>\n"
+        f"🧧 <code>/check [сумма] [людей]</code> — раздать чек\n"
+        f"🤝 <code>/ref</code> — реферальная система (3%)\n"
+        f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
@@ -344,7 +400,7 @@ async def cmd_ref(message: Message):
 
     text = (
         f"🤝 <b>Реферальная программа</b>\n\n"
-        f"Приглашай друзей и получай <b>3% от каждого их проигрыша</b> в любых режимах кубиков!\n\n"
+        f"Приглашай друзей и получай <b>3% от каждого их проигрыша</b> во всех режимах кубиков!\n\n"
         f"👥 Твоих рефералов: <b>{ref_count}</b>\n"
         f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
     )
@@ -359,12 +415,19 @@ async def cmd_profile(message: Message):
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         user = await db.get_user(user_id)
 
-    _, name, balance, turnover, wins, losses, draws, warns, _ = user
+    _, name, balance, turnover, wins, losses, draws, warns, _, clan_id = user
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
 
+    clan_tag = "<i>Без клана</i>"
+    if clan_id:
+        clan = await db.get_clan(clan_id)
+        if clan:
+            clan_tag = f"<b>[{html.escape(clan['name'])}]</b>"
+
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(user_id, name)}\n"
+        f"┣ 🏰 <b>Клан:</b> {clan_tag}\n"
         f"┣ 🆔 <b>ID:</b> <code>{user_id}</code>\n"
         f"┣ 💰 <b>Баланс:</b> <code>{balance} 💰</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{turnover} 💰</code>\n"
@@ -376,39 +439,189 @@ async def cmd_profile(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-@dp.message(Command("pay"))
-async def cmd_pay(message: Message, command: CommandObject):
-    if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Ответьте этой командой на сообщение игрока!")
+# ================= КЛАНОВАЯ СИСТЕМА =================
+@dp.message(Command("create_clan"))
+async def cmd_create_clan(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
-    recipient = message.reply_to_message.from_user
-    sender = message.from_user
+    if not command.args:
+        return await message.answer("❌ Укажите название клана: <code>/create_clan [Название]</code>", parse_mode="HTML")
 
-    if recipient.id == sender.id:
-        return await message.answer("❌ Нельзя переводить монеты самому себе!")
+    clan_name = command.args.strip()
+    if len(clan_name) < 3 or len(clan_name) > 16:
+        return await message.answer("❌ Название клана должно быть от 3 до 16 символов!")
+
+    user = await db.get_user(user_id)
+    if user[9]:  # clan_id
+        return await message.answer("❌ Вы уже состоите в клане! Сначала покиньте его через /leave_clan.")
+
+    creation_cost = 250
+    if user[2] < creation_cost:
+        return await message.answer(f"❌ Создание клана стоит <b>{creation_cost} 💰</b>. У вас: {user[2]} 💰", parse_mode="HTML")
+
+    await db.change_balance(user_id, -creation_cost)
+    clan_id = await db.create_clan(user_id, clan_name)
+
+    if not clan_id:
+        await db.change_balance(user_id, creation_cost)
+        return await message.answer("❌ Клан с таким названием уже существует! Выберите другое имя.")
+
+    await message.answer(f"🏰 <b>Клан [{html.escape(clan_name)}] успешно создан!</b>\n👑 Лидер: {get_mention(user_id, message.from_user.full_name)}", parse_mode="HTML")
+
+
+@dp.message(Command("clan"))
+async def cmd_clan(message: Message):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user[9]:
+        return await message.answer("🛡 Вы не состоите в клане. Создайте свой: <code>/create_clan [Название]</code> (250 💰)", parse_mode="HTML")
+
+    clan = await db.get_clan(user[9])
+    if not clan:
+        await db.set_user_clan(user_id, None)
+        return await message.answer("❌ Ваш клан был расформирован.")
+
+    members_count = await db.get_clan_members_count(clan["clan_id"])
+    owner_data = await db.get_user(clan["owner_id"])
+    owner_name = owner_data[1] if owner_data else "Неизвестно"
+
+    text = (
+        f"🏰 <b>Информация о клане: [{html.escape(clan['name'])}]</b>\n\n"
+        f"👑 <b>Глава:</b> {get_mention(clan['owner_id'], owner_name)}\n"
+        f"👥 <b>Участников:</b> <code>{members_count} чел.</code>\n"
+        f"💰 <b>Казна клана:</b> <code>{clan['treasury']} 💰</code>\n\n"
+        f"📌 <i>Пополнить казну: <code>/clan_deposit [сумма]</code></i>\n"
+        f"👥 <i>Пригласить игрока: <code>/invite_clan</code> (ответом)</i>\n"
+        f"🚪 <i>Покинуть клан: <code>/leave_clan</code></i>"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(Command("clan_deposit"))
+async def cmd_clan_deposit(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user[9]:
+        return await message.answer("❌ Вы не состоите в клане!")
 
     if not command.args or not command.args.isdigit():
-        return await message.answer("❌ Формат: <code>/pay 50</code>", parse_mode="HTML")
+        return await message.answer("Формат: <code>/clan_deposit 100</code>", parse_mode="HTML")
 
     amount = int(command.args)
     if amount <= 0:
-        return await message.answer("❌ Сумма перевода должна быть больше 0!")
+        return await message.answer("❌ Сумма должна быть больше 0!")
 
-    await db.register_user(sender.id, sender.full_name, sender.username)
-    await db.register_user(recipient.id, recipient.full_name, recipient.username)
+    if user[2] < amount:
+        return await message.answer(f"❌ Недостаточно средств! Ваш баланс: <b>{user[2]} 💰</b>", parse_mode="HTML")
 
-    sender_data = await db.get_user(sender.id)
-    if not sender_data or sender_data[2] < amount:
-        return await message.answer("❌ Недостаточно монет для перевода!")
+    await db.change_balance(user_id, -amount)
+    await db.add_to_clan_treasury(user[9], amount)
 
-    await db.change_balance(sender.id, -amount)
-    await db.change_balance(recipient.id, amount)
+    clan = await db.get_clan(user[9])
+    await message.answer(f"💰 {get_mention(user_id, message.from_user.full_name)} внёс <b>+{amount} 💰</b> в казну клана [{html.escape(clan['name'])}]!", parse_mode="HTML")
 
-    await message.answer(
-        f"💸 {get_mention(sender.id, sender.full_name)} перевел <b>{amount} 💰</b> "
-        f"игроку {get_mention(recipient.id, recipient.full_name)}!",
-        parse_mode="HTML"
+
+@dp.message(Command("invite_clan"))
+async def cmd_invite_clan(message: Message):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user[9]:
+        return await message.answer("❌ Вы не состоите в клане!")
+
+    clan = await db.get_clan(user[9])
+    if clan["owner_id"] != user_id:
+        return await message.answer("❌ Только лидер клана может приглашать участников!")
+
+    if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
+        return await message.answer("❌ Ответьте этой командой на сообщение игрока, которого хотите пригласить!")
+
+    target = message.reply_to_message.from_user
+    if target.id == user_id:
+        return await message.answer("❌ Вы не можете пригласить сами себя!")
+
+    target_user = await db.get_user(target.id)
+    if target_user and target_user[9]:
+        return await message.answer("❌ Этот игрок уже состоит в клане!")
+
+    invite_id = uuid.uuid4().hex[:8]
+    active_clan_invites[invite_id] = {
+        "clan_id": clan["clan_id"],
+        "clan_name": clan["name"],
+        "target_id": target.id
+    }
+
+    text = (
+        f"🏰 <b>ПРИГЛАШЕНИЕ В КЛАН!</b>\n\n"
+        f"Игрок {get_mention(target.id, target.full_name)}, вас приглашают в клан <b>[{html.escape(clan['name'])}]</b>!\n"
+        f"Лидер: {get_mention(user_id, message.from_user.full_name)}"
     )
+    await message.answer(text, reply_markup=clan_invite_keyboard(invite_id), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("ci_ac_"))
+async def cb_accept_clan_invite(call: CallbackQuery):
+    invite_id = call.data.replace("ci_ac_", "")
+    if invite_id not in active_clan_invites:
+        return await call.answer("❌ Приглашение устарело!", show_alert=True)
+
+    invite = active_clan_invites[invite_id]
+    if call.from_user.id != invite["target_id"]:
+        return await call.answer("❌ Это приглашение не для вас!", show_alert=True)
+
+    user = await db.get_user(call.from_user.id)
+    if user and user[9]:
+        del active_clan_invites[invite_id]
+        return await call.answer("❌ Вы уже состоите в клане!", show_alert=True)
+
+    await db.set_user_clan(call.from_user.id, invite["clan_id"])
+    del active_clan_invites[invite_id]
+
+    await call.message.edit_text(f"🎉 {get_mention(call.from_user.id, call.from_user.full_name)} вступил в клан <b>[{html.escape(invite['clan_name'])}]</b>!", parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("ci_dc_"))
+async def cb_decline_clan_invite(call: CallbackQuery):
+    invite_id = call.data.replace("ci_dc_", "")
+    if invite_id in active_clan_invites:
+        if call.from_user.id == active_clan_invites[invite_id]["target_id"]:
+            del active_clan_invites[invite_id]
+            await call.message.edit_text("❌ Приглашение в клан отклонено.", parse_mode="HTML")
+            return
+    await call.answer()
+
+
+@dp.message(Command("leave_clan"))
+async def cmd_leave_clan(message: Message):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user[9]:
+        return await message.answer("❌ Вы не состоите в клане!")
+
+    clan = await db.get_clan(user[9])
+    if clan["owner_id"] == user_id:
+        await db.delete_clan(clan["clan_id"])
+        await message.answer(f"💥 Лидер распустил клан <b>[{html.escape(clan['name'])}]</b>!", parse_mode="HTML")
+    else:
+        await db.set_user_clan(user_id, None)
+        await message.answer(f"🚪 Вы покинули клан <b>[{html.escape(clan['name'])}]</b>.", parse_mode="HTML")
+
+
+@dp.message(Command("clan_top"))
+async def cmd_clan_top(message: Message):
+    top_clans = await db.get_top_clans(10)
+    if not top_clans:
+        return await message.answer("Таблица кланов пуста.")
+
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    text = "🏰 <b>ТОП-10 СИЛЬНЕЙШИХ КЛАНОВ (ПО КАЗНЕ):</b>\n\n"
+    for i, row in enumerate(top_clans, 1):
+        place = medals.get(i, f"<b>{i}.</b>")
+        name = html.escape(row["name"])
+        treasury = row["treasury"]
+        text += f"{place} [{name}] — <code>{treasury} 💰</code> в казне\n"
+
+    await message.answer(text, parse_mode="HTML")
 
 
 # ================= РАЗДАЧИ ЧЕКОВ (/check, /drop) =================
@@ -724,8 +937,7 @@ async def cmd_odd(message: Message, command: CommandObject):
 
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
-
-    bet = 15
+        bet = 15
     if command.args and command.args.isdigit():
         bet = int(command.args)
     if bet <= 0:
@@ -761,6 +973,7 @@ async def cmd_odd(message: Message, command: CommandObject):
 async def cmd_miner(message: Message, command: CommandObject):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
@@ -827,7 +1040,7 @@ async def cb_miner_roll(call: CallbackQuery):
     await asyncio.sleep(4.0)
     rolled_cell = dice_msg.dice.value
 
-    # Мина
+    # Попадание на мину
     if rolled_cell == game["mine"]:
         bet = game["bet"]
         del active_miners[user_id]
@@ -856,7 +1069,7 @@ async def cb_miner_roll(call: CallbackQuery):
         )
         return await call.message.answer(res, reply_markup=miner_keyboard(user_id, current_mult, next_mult), parse_mode="HTML")
 
-    # Новая клетка
+    # Новая чистая клетка
     game["opened"].add(rolled_cell)
     game["step"] += 1
     game["is_rolling"] = False
@@ -1133,7 +1346,6 @@ async def cmd_top(message: Message):
 async def cmd_add_promo(message: Message, command: CommandObject):
     if not await db.is_admin(message.from_user.id):
         return
-
     if not command.args or len(command.args.split()) < 3:
         return await message.answer("Формат: <code>/add_promo [КОД] [НАГРАДА] [КОЛ-ВО]</code>", parse_mode="HTML")
 
@@ -1314,7 +1526,7 @@ async def cmd_unban(message: Message, command: CommandObject):
         await message.chat.unban(user_id=target_id, only_if_banned=True)
         await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка разбана: {e}")
+        await message.answer(f"❌ Ошибка разбана (проверьте права бота): {e}")
 
 
 @dp.message(Command("warn"))
@@ -1359,6 +1571,9 @@ async def on_startup(bot: Bot):
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
         BotCommand(command="miner", description="Кубический сапёр 1x6 💣"),
+        BotCommand(command="clan", description="Мой клан 🛡"),
+        BotCommand(command="create_clan", description="Создать клан (250 💰) 🚩"),
+        BotCommand(command="clan_top", description="Топ кланов 🏰"),
         BotCommand(command="over", description="Больше (4-6) 📈"),
         BotCommand(command="under", description="Меньше (1-3) 📉"),
         BotCommand(command="even", description="Чётное число ⚖️"),
