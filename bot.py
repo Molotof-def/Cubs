@@ -39,10 +39,16 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
+# 🖼 Картинки для исходов игр (можно заменить на свои ссылки)
+IMG_WIN = "https://img.freepik.com/free-vector/you-win-lettering-pop-art_175838-498.jpg"
+IMG_LOSS = "https://img.freepik.com/free-vector/game-over-effect_23-2148101569.jpg"
+IMG_DRAW = "https://img.freepik.com/free-vector/versus-vs-letters-competition-background_1017-26284.jpg"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Сессии в оперативной памяти
 active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
@@ -54,6 +60,15 @@ chat_recent_users: Dict[int, List[int]] = {}
 def get_mention(user_id: int, name: str) -> str:
     safe_name = html.escape(name or "Игрок")
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
+    """Безопасная отправка картинки с результатом игры"""
+    try:
+        await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
+    except Exception as e:
+        logging.warning(f"Не удалось отправить фото: {e}. Отправка текстового результата.")
+        await message.answer(text=caption, parse_mode="HTML", reply_markup=reply_markup)
 
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
@@ -770,7 +785,7 @@ async def cb_ladder_step(call: CallbackQuery):
             f"🎲 Выпало число: [ <b>{val}</b> ] (Осечка 1-2)\n"
             f"📉 Ставка сгорела: <b>-{bet} 💰</b>"
         )
-        return await call.message.answer(res, parse_mode="HTML")
+        return await send_game_result(call.message, IMG_LOSS, res)
 
     # Успешный шаг (3, 4, 5, 6)
     game["step"] += 1
@@ -793,7 +808,7 @@ async def cb_ladder_step(call: CallbackQuery):
             f"🔥 Максимальный множитель: <b>x{mult}</b>\n"
             f"💵 Выигрыш: <b>+{win} 💰</b>"
         )
-        return await call.message.answer(res, parse_mode="HTML")
+        return await send_game_result(call.message, IMG_WIN, res)
 
     current_win = int(game["bet"] * mult)
     res = (
@@ -836,7 +851,7 @@ async def cb_ladder_cash(call: CallbackQuery):
         f"📈 Зафиксирован множитель: <b>x{mult}</b>\n"
         f"💵 На баланс зачислено: <b>+{win} 💰</b>"
     )
-    await call.message.answer(res, parse_mode="HTML")
+    await send_game_result(call.message, IMG_WIN, res)
 
 
 # ================= 🌧 ДЕНЕЖНЫЙ ДОЖДЬ (/rain) =================
@@ -1161,7 +1176,7 @@ async def cb_claim_check(call: CallbackQuery):
         await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
 
 
-# ================= ОДИНОЧНЫЕ КУБИКИ (ГАРАНТИРОВАННЫЙ ВЫВОД) =================
+# ================= ОДИНОЧНЫЕ КУБИКИ (С КАРТИНКАМИ) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -1197,20 +1212,21 @@ async def cmd_dice(message: Message, command: CommandObject):
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, text)
     elif p_val < b_val:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception as e:
             logging.error(f"Error in loss processing: {e}")
-        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n📉 Потеряно: <b>-{bet} 💰</b>"
+        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, text)
     else:
         await db.change_balance(user_id, bet)
         await db.record_game(user_id, "draw")
         text = f"╔════════════════════╗\n      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n╚════════════════════╝\n\n🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n💰 <b>Возврат:</b> <code>+{bet} 💰</code>"
-
-    await message.answer(text, parse_mode="HTML")
+        await send_game_result(message, IMG_DRAW, text)
 
 
 @dp.message(Command("doubledice"))
@@ -1257,20 +1273,21 @@ async def cmd_double_dice(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
 
         bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
-        res = f"🎉 <b>ПОБЕДА!</b>\n\n👤 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{win} 💰</b>"
+        res = f"🎉 <b>ПОБЕДА!</b>\n\n👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, res)
     elif p_sum < b_sum:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception as e:
             logging.error(f"Error in loss processing: {e}")
-        res = f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n👤 {p1} + {p2} = <b>{p_sum}</b>\n🤖 {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{bet} 💰</b>"
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, res)
     else:
         await db.change_balance(user_id, bet)
         await db.record_game(user_id, "draw")
         res = f"╔════════════════════╗\n    ⚖️ <b>DOUBLE НИЧЬЯ! ({p_sum} = {b_sum})</b> ⚖️\n╚════════════════════╝\n\n💰 Ставка <b>{bet} 💰</b> возвращена!"
-
-    await message.answer(res, parse_mode="HTML")
+        await send_game_result(message, IMG_DRAW, res)
 
 
 @dp.message(Command("over"))
@@ -1303,16 +1320,16 @@ async def cmd_over(message: Message, command: CommandObject):
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, res)
     else:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception:
             pass
-        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
-
-    await message.answer(res, parse_mode="HTML")
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, res)
 
 
 @dp.message(Command("under"))
@@ -1345,16 +1362,16 @@ async def cmd_under(message: Message, command: CommandObject):
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, res)
     else:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception:
             pass
-        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
-
-    await message.answer(res, parse_mode="HTML")
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, res)
 
 
 @dp.message(Command("even"))
@@ -1387,16 +1404,16 @@ async def cmd_even(message: Message, command: CommandObject):
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, res)
     else:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception:
             pass
-        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
-
-    await message.answer(res, parse_mode="HTML")
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, res)
 
 
 @dp.message(Command("odd"))
@@ -1429,16 +1446,16 @@ async def cmd_odd(message: Message, command: CommandObject):
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
-        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        await send_game_result(message, IMG_WIN, res)
     else:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception:
             pass
-        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
-
-    await message.answer(res, parse_mode="HTML")
+        res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+        await send_game_result(message, IMG_LOSS, res)
 
 
 # ================= ДУЭЛИ МЕЖДУ ИГРОКАМИ =================
@@ -1557,21 +1574,23 @@ async def cb_accept_duel(call: CallbackQuery):
         await db.record_game(o_id, "loss")
         await db.process_referral_loss(o_id, bet)
         res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{bet} 💰 ]\n\n💵 Выигрыш: <b>+{win_sum} 💰</b>"
+        await send_game_result(call.message, IMG_WIN, res)
     elif o_val > c_val:
         await db.change_balance(o_id, win_sum)
         await db.record_game(o_id, "win")
         await db.record_game(c_id, "loss")
         await db.process_referral_loss(c_id, bet)
         res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{bet} 💰 ]\n\n💵 Выигрыш: <b>+{win_sum} 💰</b>"
+        await send_game_result(call.message, IMG_WIN, res)
     else:
         await db.change_balance(c_id, bet)
         await db.change_balance(o_id, bet)
         await db.record_game(c_id, "draw")
         await db.record_game(o_id, "draw")
         res = f"╔════════════════════╗\n      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n╚════════════════════╝\n\n💰 Ставки возвращены (+{bet} 💰 каждому)."
+        await send_game_result(call.message, IMG_DRAW, res)
 
     del active_duels[duel_id]
-    await call.message.answer(res, parse_mode="HTML")
     await call.answer()
 
 
