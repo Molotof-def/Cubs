@@ -43,7 +43,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Сессии в оперативной памяти
 active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
@@ -141,7 +140,8 @@ class Database:
                     req_id TEXT PRIMARY KEY,
                     user_id BIGINT,
                     amount BIGINT,
-                    details TEXT,
+                    stars_amount INT,
+                    target_username TEXT,
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -164,6 +164,8 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS clan_id INT DEFAULT NULL;
+                ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS stars_amount INT DEFAULT 0;
+                ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS target_username TEXT DEFAULT '';
             """)
             await conn.execute("""
                 INSERT INTO promo_codes (code, reward, uses_left) 
@@ -211,19 +213,22 @@ class Database:
     async def process_referral_loss(self, loser_id: int, lost_amount: int):
         if lost_amount <= 0:
             return
-        async with self.pool.acquire() as conn:
-            ref_id = await conn.fetchval("SELECT referrer_id FROM users WHERE user_id = $1", loser_id)
-            if ref_id and ref_id != loser_id:
-                reward = max(1, int(lost_amount * 0.03))
-                await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, ref_id)
-                try:
-                    await bot.send_message(
-                        chat_id=ref_id,
-                        text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал проиграл <code>{lost_amount} 💰</code>. Вам начислено 3%: <b>+{reward} 💰</b>",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
+        try:
+            async with self.pool.acquire() as conn:
+                ref_id = await conn.fetchval("SELECT referrer_id FROM users WHERE user_id = $1", loser_id)
+                if ref_id and ref_id != loser_id:
+                    reward = max(1, int(lost_amount * 0.03))
+                    await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, ref_id)
+                    try:
+                        await bot.send_message(
+                            chat_id=ref_id,
+                            text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал проиграл <code>{lost_amount} 💰</code>. Вам начислено 3%: <b>+{reward} 💰</b>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logging.error(f"Error in process_referral_loss: {e}")
 
     # ================= КЛАНЫ =================
     async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
@@ -371,7 +376,7 @@ def clan_invite_keyboard(invite_id: str):
 
 def withdraw_admin_keyboard(req_id: str):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Выплачено", callback_data=f"wd_ok_{req_id}")
+    builder.button(text="✅ Звёзды отправлены", callback_data=f"wd_ok_{req_id}")
     builder.button(text="❌ Отклонить (Возврат)", callback_data=f"wd_no_{req_id}")
     builder.adjust(2)
     return builder.as_markup()
@@ -442,11 +447,11 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👥 <code>/invite_clan</code> (ответом) — пригласить в клан\n"
         f"💰 <code>/clan_deposit [сумма]</code> — пополнить казну\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
-        f"🎁 <b>Финансы и Вывод:</b>\n"
-        f"📤 <code>/withdraw [сумма] [реквизиты]</code> — вывод (от 1000 💰)\n"
+        f"⭐ <b>Вывод Telegram Stars:</b>\n"
+        f"📤 <code>/withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
         f"🌧 <code>/rain [сумма] [людей]</code> — денежный дождь\n"
-        f"🤝 <code>/ref</code> — реферальная система (3%)\n"
+        f"🤝 <code>/ref</code> — реферальная ссылка (3%)\n"
         f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
@@ -536,32 +541,33 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
-# ================= 📤 ВЫВОД СРЕДСТВ (ОТ 1000 💰) =================
+# ================= ⭐ ВЫВОД TELEGRAM STARS (КУРС 10:1, ОТ 1000 💰) =================
 @dp.message(Command("withdraw"))
 @dp.message(Command("out"))
 async def cmd_withdraw(message: Message, command: CommandObject):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
-    if not command.args or len(command.args.split(maxsplit=1)) < 2:
+    if not command.args:
         return await message.answer(
-            "📤 <b>Вывод средств</b>\n\n"
-            "Минимальная сумма для вывода: <b>1000 💰</b>\n"
-            "Формат: <code>/withdraw [сумма] [реквизиты/кошелек/карта]</code>\n\n"
-            "<i>Пример:</i> <code>/withdraw 1500 +79991234567 СБП Т-Банк</code>",
+            "⭐ <b>Вывод в Telegram Stars</b>\n\n"
+            "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
+            "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
+            "Формат: <code>/withdraw [монеты] [твой_тег/юзернейм]</code>\n"
+            "<i>Пример:</i> <code>/withdraw 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
         )
 
-    parts = command.args.split(maxsplit=1)
+    parts = command.args.split()
     if not parts[0].isdigit():
         return await message.answer("❌ Сумма должна быть числом!")
 
     amount = int(parts[0])
-    details = parts[1].strip()
+    target_username = parts[1].strip() if len(parts) > 1 else (f"@{message.from_user.username}" if message.from_user.username else str(user_id))
 
     if amount < 1000:
         return await message.answer(
-            f"❌ <b>Минимальная сумма для вывода: 1000 💰!</b>\nВаша сумма: <code>{amount} 💰</code>",
+            f"❌ <b>Минимальная сумма вывода: 1000 💰 (= 100 ⭐)!</b>\nВаша сумма: <code>{amount} 💰</code>",
             parse_mode="HTML"
         )
 
@@ -573,29 +579,33 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
+    stars_to_receive = amount // 10
+
     await db.change_balance(user_id, -amount)
     req_id = uuid.uuid4().hex[:8]
 
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO withdraw_requests (req_id, user_id, amount, details, status) VALUES ($1, $2, $3, $4, 'pending')",
-            req_id, user_id, amount, details
+            "INSERT INTO withdraw_requests (req_id, user_id, amount, stars_amount, target_username, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+            req_id, user_id, amount, stars_to_receive, target_username
         )
 
     await message.answer(
-        f"⏳ <b>Заявка на вывод #{req_id} принята!</b>\n\n"
-        f"💰 Сумма: <b>{amount} 💰</b>\n"
-        f"💳 Реквизиты: <code>{html.escape(details)}</code>\n\n"
-        f"<i>Средства списаны с баланса. Ожидайте обработки администратором.</i>",
+        f"⏳ <b>Заявка на вывод Stars #{req_id} создана!</b>\n\n"
+        f"💰 Списано: <b>{amount} 💰</b>\n"
+        f"⭐ К получению: <b>{stars_to_receive} Telegram Stars</b>\n"
+        f"👤 Получатель: <code>{html.escape(target_username)}</code>\n\n"
+        f"<i>Администратор отправит звёзды подарком на указанный аккаунт в ближайшее время.</i>",
         parse_mode="HTML"
     )
 
     if OWNER_ID:
         admin_text = (
-            f"🚨 <b>НОВАЯ ЗАЯВКА НА ВЫВОД #{req_id}</b>\n\n"
+            f"🚨 <b>ЗАЯВКА НА ВЫВОД STARS #{req_id}</b>\n\n"
             f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)} (ID: <code>{user_id}</code>)\n"
-            f"💰 Сумма: <b>{amount} 💰</b>\n"
-            f"💳 Реквизиты: <code>{html.escape(details)}</code>"
+            f"💰 Списано монет: <b>{amount} 💰</b>\n"
+            f"⭐ <b>Отправить звёзд: {stars_to_receive} ⭐</b>\n"
+            f"🔗 Получатель: {html.escape(target_username)}"
         )
         try:
             await bot.send_message(
@@ -616,20 +626,22 @@ async def cb_withdraw_approve(call: CallbackQuery):
     req_id = call.data.replace("wd_ok_", "")
     
     async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        req = await conn.fetchrow("SELECT user_id, amount, stars_amount, target_username, status FROM withdraw_requests WHERE req_id = $1", req_id)
         if not req or req["status"] != "pending":
             return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
 
         await conn.execute("UPDATE withdraw_requests SET status = 'approved' WHERE req_id = $1", req_id)
 
+    stars = req["stars_amount"] if req["stars_amount"] else req["amount"] // 10
+
     try:
         await bot.send_message(
             chat_id=req["user_id"],
             text=(
-                f"✅ <b>Заявка на вывод #{req_id} успешно выполнена!</b>\n\n"
-                f"💰 Выплачено: <b>{req['amount']} 💰</b>\n"
-                f"💳 На реквизиты: <code>{html.escape(req['details'])}</code>\n\n"
-                f"<i>Спасибо за игру!</i>"
+                f"✅ <b>Заявка #{req_id} выплачена!</b>\n\n"
+                f"⭐ Вам отправлено: <b>+{stars} Telegram Stars</b>\n"
+                f"👤 На аккаунт: <code>{html.escape(req['target_username'])}</code>\n\n"
+                f"<i>Спасибо за игру в Dice Club!</i>"
             ),
             parse_mode="HTML"
         )
@@ -637,10 +649,10 @@ async def cb_withdraw_approve(call: CallbackQuery):
         pass
 
     await call.message.edit_text(
-        f"{call.message.text}\n\n<b>✅ СТАТУС: Выплачено администратором {get_mention(call.from_user.id, call.from_user.full_name)}</b>",
+        f"{call.message.text}\n\n<b>✅ СТАТУС: Звёзды отправлены админом {get_mention(call.from_user.id, call.from_user.full_name)}</b>",
         parse_mode="HTML"
     )
-    await call.answer("✅ Выплата подтверждена!")
+    await call.answer("✅ Выплата Stars подтверждена!")
 
 
 @dp.callback_query(F.data.startswith("wd_no_"))
@@ -664,7 +676,7 @@ async def cb_withdraw_reject(call: CallbackQuery):
             text=(
                 f"❌ <b>Заявка на вывод #{req_id} отклонена!</b>\n\n"
                 f"💰 Сумма <b>{req['amount']} 💰</b> возвращена на ваш игровой баланс.\n"
-                f"<i>Проверьте правильность реквизитов и повторите попытку.</i>"
+                f"<i>Убедитесь в правильности указанного @username и повторите попытку.</i>"
             ),
             parse_mode="HTML"
         )
@@ -1187,8 +1199,11 @@ async def cmd_dice(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
         text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     elif p_val < b_val:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception as e:
+            logging.error(f"Error in loss processing: {e}")
         text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n📉 Потеряно: <b>-{bet} 💰</b>"
     else:
         await db.change_balance(user_id, bet)
@@ -1244,8 +1259,11 @@ async def cmd_double_dice(message: Message, command: CommandObject):
         bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
         res = f"🎉 <b>ПОБЕДА!</b>\n\n👤 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{win} 💰</b>"
     elif p_sum < b_sum:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception as e:
+            logging.error(f"Error in loss processing: {e}")
         res = f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n👤 {p1} + {p2} = <b>{p_sum}</b>\n🤖 {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{bet} 💰</b>"
     else:
         await db.change_balance(user_id, bet)
@@ -1287,8 +1305,11 @@ async def cmd_over(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
         res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     else:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception:
+            pass
         res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
 
     await message.answer(res, parse_mode="HTML")
@@ -1326,8 +1347,11 @@ async def cmd_under(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
         res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ]\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     else:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception:
+            pass
         res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ]\n📉 Потеряно: <b>-{bet} 💰</b>"
 
     await message.answer(res, parse_mode="HTML")
@@ -1365,8 +1389,11 @@ async def cmd_even(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
         res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     else:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception:
+            pass
         res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
 
     await message.answer(res, parse_mode="HTML")
@@ -1404,8 +1431,11 @@ async def cmd_odd(message: Message, command: CommandObject):
         await db.record_game(user_id, "win")
         res = f"🏆 <b>ПОБЕДА!</b> Выпало: [ <b>{val}</b> ] (Нечётное)\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
     else:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception:
+            pass
         res = f"💀 <b>ПОРАЖЕНИЕ!</b> Выпало: [ <b>{val}</b> ] (Чётное)\n📉 Потеряно: <b>-{bet} 💰</b>"
 
     await message.answer(res, parse_mode="HTML")
@@ -1856,7 +1886,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="under", description="Меньше (1-3) 📉"),
         BotCommand(command="even", description="Чётное число ⚖️"),
         BotCommand(command="odd", description="Нечётное число 🎲"),
-        BotCommand(command="withdraw", description="Вывод средств (от 1000 💰) 📤"),
+        BotCommand(command="withdraw", description="Вывод в Telegram Stars ⭐"),
         BotCommand(command="check", description="Раздать чек в чат 🧧"),
         BotCommand(command="rain", description="Денежный дождь в чат 🌧"),
         BotCommand(command="profile", description="Мой профиль и баланс 👤"),
