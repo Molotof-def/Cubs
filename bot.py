@@ -4,6 +4,7 @@ import logging
 import random
 import html
 import uuid
+import re
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
@@ -39,19 +40,19 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# Кошелек для приема пополнений в GRAM / TON
+# Кошелек для приёма GRAM / TON
 GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
 
-# Надежные картинки
-IMG_WIN = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=800&auto=format&fit=crop&q=80"
-IMG_LOSS = "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=800&auto=format&fit=crop&q=80"
-IMG_DRAW = "https://images.unsplash.com/photo-1511193311914-0346f16efe90?w=800&auto=format&fit=crop&q=80"
+# Прямые CDN-картинки высокой доступности для Telegram
+IMG_WIN = "https://i.imgur.com/v8tXgU2.png"
+IMG_LOSS = "https://i.imgur.com/K3ZJ3vE.png"
+IMG_DRAW = "https://i.imgur.com/2Uf3U9F.png"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Сессии в оперативной памяти
+# Сессии в памяти
 active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
@@ -61,18 +62,31 @@ active_gram_invoices: Dict[str, dict] = {}
 chat_recent_users: Dict[int, List[int]] = {}
 
 
-def get_mention(user_id: int, name: str) -> str:
+def get_mention(user_id: int, name: Optional[str]) -> str:
     safe_name = html.escape(name or "Игрок")
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
-    """Надежная отправка результата игры"""
+async def send_game_result(message: Message, photo_url: Optional[str], caption: str, reply_markup=None):
+    """Отказоустойчивая отправка результата игры"""
+    if photo_url:
+        try:
+            await message.answer_photo(
+                photo=photo_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+            return
+        except Exception as e:
+            logging.warning(f"Ошибка загрузки фото ({e}), переключение на текстовый режим.")
+
     try:
-        await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
-    except Exception as e:
-        logging.warning(f"Ошибка отправки фото ({e}). Отправка обычным текстом.")
         await message.answer(text=caption, parse_mode="HTML", reply_markup=reply_markup)
+    except Exception as e:
+        logging.error(f"Ошибка HTML-парсинга: {e}. Отправка в чистом тексте.")
+        clean_text = re.sub(r'<[^>]+>', '', caption)
+        await message.answer(text=clean_text, reply_markup=reply_markup)
 
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
@@ -99,7 +113,7 @@ async def check_subscription(user_id: int) -> bool:
     except Exception as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
-            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Бот должен быть АДМИНОМ канала!")
+            logging.error(f"⚠️ Бот должен быть АДМИНИСТРАТОРОМ канала {chat_target}! Пропуск проверки.")
             return True
         logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
@@ -261,7 +275,7 @@ class Database:
                     except Exception:
                         pass
         except Exception as e:
-            logging.error(f"Error in referral processing: {e}")
+            logging.error(f"Ошибка начисления реферальных: {e}")
 
     # ================= КЛАНЫ =================
     async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
@@ -417,7 +431,7 @@ def withdraw_admin_keyboard(req_id: str):
 
 def gram_admin_keyboard(inv_id: str):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Подтвердить поступление", callback_data=f"g_ok_{inv_id}")
+    builder.button(text="✅ Подтвердить зачисление", callback_data=f"g_ok_{inv_id}")
     builder.button(text="❌ Отклонить", callback_data=f"g_no_{inv_id}")
     builder.adjust(2)
     return builder.as_markup()
@@ -480,7 +494,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"🚩 <code>/create_clan [имя]</code> — создать клан (2500 💰)\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
         f"💳 <b>Пополнение и Вывод:</b>\n"
-        f"💎 <code>/gram [кол-во]</code> — пополнить через Gram / TON\n"
+        f"💎 <code>/gram [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
         f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>/withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
@@ -622,7 +636,7 @@ async def cmd_gram(message: Message, command: CommandObject):
         f"💵 К оплате: <code>{gram_amount} GRAM</code> (или TON)\n\n"
         f"📍 <b>Адрес кошелька:</b>\n<code>{GRAM_WALLET}</code>\n\n"
         f"📝 <b>ОБЯЗАТЕЛЬНЫЙ комментарий (MEMO):</b>\n<code>{invoice_id}</code>\n\n"
-        f"⚠️ <i>Обязательно укажите комментарий <code>{invoice_id}</code> при переводе! После оплаты нажмите кнопку «Я оплатил».</i>"
+        f"⚠️ <i>Обязательно укажите комментарий <code>{invoice_id}</code> при переводе! После перевода нажмите кнопку «Я оплатил».</i>"
     )
     await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
@@ -639,7 +653,7 @@ async def cb_gram_check(call: CallbackQuery):
             return await call.answer("✅ Этот платеж уже зачислен!", show_alert=True)
 
     await call.answer("⏳ Запрос на проверку отправлен администраторам!", show_alert=True)
-    await call.message.edit_text("⏳ <b>Платеж на проверке!</b> Монеты будут зачислены после подтверждения транзакции в блокчейне.", parse_mode="HTML")
+    await call.message.edit_text("⏳ <b>Платеж отправлен на проверку!</b> Монеты будут зачислены после проверки перевода.", parse_mode="HTML")
 
     if OWNER_ID:
         admin_text = (
@@ -657,7 +671,7 @@ async def cb_gram_check(call: CallbackQuery):
                 parse_mode="HTML"
             )
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление о Gram: {e}")
+            logging.error(f"Ошибка отправки уведомления админу: {e}")
 
 
 @dp.callback_query(F.data.startswith("g_ok_"))
@@ -701,7 +715,7 @@ async def cb_gram_reject(call: CallbackQuery):
     await call.answer("❌ Заявка отклонена.")
 
 
-# ================= ⭐ ВЫВОД STARS (КУРС 10:1, ЗАЩИТА ОТ РЕФАНДА 21 ДЕНЬ) =================
+# ================= ⭐ ВЫВОД STARS (КУРС 10:1, ЗАЩИТА 21 ДЕНЬ) =================
 @dp.message(Command("withdraw"))
 @dp.message(Command("out"))
 async def cmd_withdraw(message: Message, command: CommandObject):
@@ -740,7 +754,6 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
-    # Защита от Refund: проверка 21 дня с момента депозита Stars или регистрации
     last_stars_dep = user[11]
     created_at = user[12] or datetime.now()
 
@@ -934,14 +947,17 @@ async def cb_ladder_step(call: CallbackQuery):
     await call.message.answer(f"🎲 Бросок кубика для подъема {get_mention(user_id, call.from_user.full_name)}:", parse_mode="HTML")
     dice_msg = await call.message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    val = dice_msg.dice.value
+    val = int(dice_msg.dice.value)
 
     # Падение (1 или 2)
     if val in [1, 2]:
         bet = game["bet"]
         del active_ladders[user_id]
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
+        try:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+        except Exception:
+            pass
 
         res = (
             f"💀 <b>ПАДЕНИЕ С ЛЕСНИЦЫ!</b>\n\n"
@@ -1340,7 +1356,7 @@ async def cb_claim_check(call: CallbackQuery):
         await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
 
 
-# ================= ОДИНОЧНЫЕ ИГРЫ (МИН. СТАВКА 100 💰) =================
+# ================= ОДИНОЧНЫЕ ИГРЫ (100% ГАРАНТИЯ ВЫВОДА) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -1365,31 +1381,52 @@ async def cmd_dice(message: Message, command: CommandObject):
     await message.answer(f"🎲 Бросок {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
     p_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    p_val = p_msg.dice.value
+    p_val = int(p_msg.dice.value)
 
     await message.answer("🤖 Бросок Бота:", parse_mode="HTML")
     b_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    b_val = b_msg.dice.value
+    b_val = int(b_msg.dice.value)
 
     if p_val > b_val:
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-        text = f"🏆 <b>ПОБЕДА!</b> ({p_val} > {b_val})\n\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Коэффициент: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
+        try:
+            await db.record_game(user_id, "win")
+        except Exception:
+            pass
+        text = (
+            f"🏆 <b>ПОБЕДА!</b>\n\n"
+            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
+            f"👤 {get_mention(user_id, message.from_user.full_name)}\n"
+            f"💰 Коэффициент: <b>x1.95</b>\n"
+            f"💵 Выигрыш: <b>+{win} 💰</b>"
+        )
         await send_game_result(message, IMG_WIN, text)
     elif p_val < b_val:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception as e:
-            logging.error(f"Error in loss processing: {e}")
-        text = f"💀 <b>ПОРАЖЕНИЕ!</b> ({p_val} < {b_val})\n\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
+            logging.error(f"Ошибка фиксации поражения: {e}")
+        text = (
+            f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n"
+            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
+            f"👤 {get_mention(user_id, message.from_user.full_name)}\n"
+            f"📉 Потеряно: <b>-{bet} 💰</b>"
+        )
         await send_game_result(message, IMG_LOSS, text)
     else:
         await db.change_balance(user_id, bet)
-        await db.record_game(user_id, "draw")
-        text = f"╔════════════════════╗\n      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n╚════════════════════╝\n\n🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n💰 <b>Возврат:</b> <code>+{bet} 💰</code>"
+        try:
+            await db.record_game(user_id, "draw")
+        except Exception:
+            pass
+        text = (
+            f"╔════════════════════╗\n      ⚖️ <b>БОЕВАЯ НИЧЬЯ!</b> ⚖️\n╚════════════════════╝\n\n"
+            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
+            f"💰 <b>Возврат:</b> <code>+{bet} 💰</code>"
+        )
         await send_game_result(message, IMG_DRAW, text)
 
 
@@ -1418,14 +1455,14 @@ async def cmd_double_dice(message: Message, command: CommandObject):
     p_d1 = await message.answer_dice(emoji="🎲")
     p_d2 = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    p1, p2 = p_d1.dice.value, p_d2.dice.value
+    p1, p2 = int(p_d1.dice.value), int(p_d2.dice.value)
     p_sum = p1 + p2
 
     await message.answer("🤖 <b>Бросок двух кубиков Бота:</b>", parse_mode="HTML")
     b_d1 = await message.answer_dice(emoji="🎲")
     b_d2 = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    b1, b2 = b_d1.dice.value, b_d2.dice.value
+    b1, b2 = int(b_d1.dice.value), int(b_d2.dice.value)
     b_sum = b1 + b2
 
     if p_sum > b_sum:
@@ -1434,7 +1471,10 @@ async def cmd_double_dice(message: Message, command: CommandObject):
         win = int(bet * mult)
 
         await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
+        try:
+            await db.record_game(user_id, "win")
+        except Exception:
+            pass
 
         bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
         res = f"🎉 <b>ПОБЕДА!</b>\n\n👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{win} 💰</b>"
@@ -1444,12 +1484,15 @@ async def cmd_double_dice(message: Message, command: CommandObject):
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
         except Exception as e:
-            logging.error(f"Error in loss processing: {e}")
+            logging.error(f"Ошибка фиксации поражения: {e}")
         res = f"💀 <b>ПОРАЖЕНИЕ!</b>\n\n👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{bet} 💰</b>"
         await send_game_result(message, IMG_LOSS, res)
     else:
         await db.change_balance(user_id, bet)
-        await db.record_game(user_id, "draw")
+        try:
+            await db.record_game(user_id, "draw")
+        except Exception:
+            pass
         res = f"╔════════════════════╗\n    ⚖️ <b>DOUBLE НИЧЬЯ! ({p_sum} = {b_sum})</b> ⚖️\n╚════════════════════╝\n\n💰 Ставка <b>{bet} 💰</b> возвращена!"
         await send_game_result(message, IMG_DRAW, res)
 
@@ -1478,7 +1521,7 @@ async def cmd_over(message: Message, command: CommandObject):
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>БОЛЬШЕ (4-6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    val = dice_msg.dice.value
+    val = int(dice_msg.dice.value)
 
     if val in [4, 5, 6]:
         win = int(bet * 1.95)
@@ -1520,7 +1563,7 @@ async def cmd_under(message: Message, command: CommandObject):
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>МЕНЬШЕ (1-3)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    val = dice_msg.dice.value
+    val = int(dice_msg.dice.value)
 
     if val in [1, 2, 3]:
         win = int(bet * 1.95)
@@ -1562,7 +1605,7 @@ async def cmd_even(message: Message, command: CommandObject):
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>ЧЁТНОЕ (2, 4, 6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    val = dice_msg.dice.value
+    val = int(dice_msg.dice.value)
 
     if val % 2 == 0:
         win = int(bet * 1.95)
@@ -1604,7 +1647,7 @@ async def cmd_odd(message: Message, command: CommandObject):
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>НЕЧЁТНОЕ (1, 3, 5)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    val = dice_msg.dice.value
+    val = int(dice_msg.dice.value)
 
     if val % 2 != 0:
         win = int(bet * 1.95)
@@ -1723,12 +1766,12 @@ async def cb_accept_duel(call: CallbackQuery):
     await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
     c_dice = await call.message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    c_val = c_dice.dice.value
+    c_val = int(c_dice.dice.value)
 
     await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
     o_dice = await call.message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
-    o_val = o_dice.dice.value
+    o_val = int(o_dice.dice.value)
 
     win_sum = int(bet * 1.95)
 
@@ -1773,7 +1816,7 @@ async def cb_decline_duel(call: CallbackQuery):
     await call.answer()
 
 
-# ================= STARS ПОПОЛНЕНИЕ (С ФИКСАЦИЕЙ ДАТЫ ХОЛДА) =================
+# ================= STARS ПОПОЛНЕНИЕ =================
 @dp.message(Command("stars"))
 @dp.message(Command("donate"))
 async def cmd_stars(message: Message, command: CommandObject):
@@ -1808,7 +1851,6 @@ async def process_successful_payment(message: Message):
         await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         await db.change_balance(message.from_user.id, coins)
         
-        # Фиксируем дату депозита Stars (для 21-дневного холда на вывод из-за Refund)
         async with db.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE users SET has_deposited = TRUE, last_stars_deposit = CURRENT_TIMESTAMP WHERE user_id = $1",
@@ -1819,7 +1861,7 @@ async def process_successful_payment(message: Message):
             f"🎉 <b>Оплата успешна!</b>\n"
             f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
             f"💰 Зачислено: <b>+{coins} монет</b>\n"
-            f"🔒 <i>Обратите внимание: вывод средств доступен через 21 день (защита Telegram Stars Refund). Для моментального вывода используйте <code>/gram</code>.</i>",
+            f"🔒 <i>Вывод доступен через 21 день (защита Telegram Stars Refund). Пополнения через <code>/gram</code> выводятся без ожидания.</i>",
             parse_mode="HTML"
         )
 
