@@ -671,6 +671,36 @@ async def cb_roulette_start(call: CallbackQuery):
     await call.answer()
 
 
+# ================= ОБНОВЛЕННАЯ ЛОГИКА РУССКОЙ РУЛЕТКИ =================
+@dp.callback_query(F.data.startswith("r_start_"))
+async def cb_roulette_start(call: CallbackQuery):
+    game_id = call.data.replace("r_start_", "")
+    if game_id not in active_roulettes:
+        return await call.answer("❌ Игра не найдена!", show_alert=True)
+
+    game = active_roulettes[game_id]
+    if call.from_user.id != game["creator_id"] and not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Только создатель может начать игру!", show_alert=True)
+
+    if len(game["players"]) < 2:
+        return await call.answer("❌ Для старта нужно минимум 2 игрока!", show_alert=True)
+
+    game["status"] = "playing"
+    # Заряжаем 2 случайных патрона (числа от 1 до 6)
+    game["bullets"] = random.sample(range(1, 7), 2)
+    random.shuffle(game["players"])
+    first_player = game["players"][0]
+
+    text = (
+        f"💀 <b>БАРАБАН ЗАКРУЧЕН! ЗАРЯЖЕНО 2 ПАТРОНА ИЗ 6!</b>\n\n"
+        f"💵 Общий банк: <b>{game['bet'] * len(game['players'])} 💰</b>\n"
+        f"🎯 Первый стреляет: {get_mention(first_player['id'], first_player['name'])}\n\n"
+        f"⚠️ <i>Шанс выстрела 33.3% (2 смертельных числа)! Выбывший получает <b>МУТ НА 2 ЧАСА</b>!</i>"
+    )
+    await call.message.edit_text(text, reply_markup=roulette_shoot_keyboard(game_id), parse_mode="HTML")
+    await call.answer()
+
+
 @dp.callback_query(F.data.startswith("r_shoot_"))
 async def cb_roulette_shoot(call: CallbackQuery):
     game_id = call.data.replace("r_shoot_", "")
@@ -689,13 +719,15 @@ async def cb_roulette_shoot(call: CallbackQuery):
 
     await call.message.edit_reply_markup(reply_markup=None)
 
-    await call.message.answer(f"🔫 {get_mention(current_player['id'], current_player['name'])} подносит револьвер к виску и нажимает на спуск...", parse_mode="HTML")
+    await call.message.answer(f"🔫 {get_mention(current_player['id'], current_player['name'])} подносит револьвер к виску и спускает курок...", parse_mode="HTML")
     dice_msg = await call.message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
     val = int(dice_msg.dice.value)
 
-    # ВЫСТРЕЛ (1) -> Выбывание и мут на 2 часа
-    if val == 1:
+    bullets = game.get("bullets", [1, 6])
+
+    # ВЫСТРЕЛ -> если выпало любое из 2 заряженных чисел
+    if val in bullets:
         eliminated = game["players"].pop(current_idx)
         try:
             await db.record_game(eliminated["id"], "loss")
@@ -703,7 +735,7 @@ async def cb_roulette_shoot(call: CallbackQuery):
         except Exception:
             pass
 
-        # Выдаем реальный мут на 2 часа (120 минут)
+        # Выдача мута на 2 часа (120 минут)
         try:
             until_mute = datetime.now() + timedelta(hours=2)
             await call.message.chat.restrict(
@@ -716,16 +748,17 @@ async def cb_roulette_shoot(call: CallbackQuery):
             mute_text = "⚠️ <i>(Не удалось выдать мут: проверьте права бота)</i>"
 
         await call.message.answer(
-            f"💥 <b>БАМ! ВЫСТРЕЛ!</b> [ Кубик: <b>1</b> ]\n\n"
+            f"💥 <b>БАМ! ВЫСТРЕЛ!</b> [ Выпало: <b>{val}</b> | Патроны были: <b>{bullets[0]}, {bullets[1]}</b> ]\n\n"
             f"💀 {get_mention(eliminated['id'], eliminated['name'])} выбывает из игры!\n{mute_text}",
             parse_mode="HTML"
         )
 
-        # Проверяем, остался ли победитель
+        # Перезаряжаем барабан двумя новыми случайными числами для следующего раунда
+        game["bullets"] = random.sample(range(1, 7), 2)
+
+        # Проверка на победителя
         if len(game["players"]) == 1:
             winner = game["players"][0]
-            total_prize = int(game["bet"] * (game["current_turn"] + len(game["players"]) + 1) * 0.95)
-            # Полный выигрыш
             actual_prize = int(game["bet"] * (game["current_turn"] + 2))
             
             await db.change_balance(winner["id"], actual_prize)
@@ -734,14 +767,14 @@ async def cb_roulette_shoot(call: CallbackQuery):
             res = (
                 f"👑 <b>ПОБЕДИТЕЛЬ РУССКОЙ РУЛЕТКИ!</b>\n\n"
                 f"👤 {get_mention(winner['id'], winner['name'])}\n"
-                f"🏆 Выжил и забрал весь банк: <b>+{actual_prize} 💰</b>"
+                f"🏆 Выжил среди всех и забрал банк: <b>+{actual_prize} 💰</b>"
             )
             del active_roulettes[game_id]
             return await send_game_result(call.message, "win", res)
 
     else:
         await call.message.answer(
-            f"😅 <i>*Щёлк*... Осечка!</i> [ Кубик: <b>{val}</b> ]\n"
+            f"😅 <i>*Щёлк*... Осечка!</i> [ Выпало: <b>{val}</b> ]\n"
             f"🛡 {get_mention(current_player['id'], current_player['name'])} выжил! Ход переходит дальше.",
             parse_mode="HTML"
         )
@@ -754,10 +787,9 @@ async def cb_roulette_shoot(call: CallbackQuery):
         f"🔫 <b>РУССКАЯ РУЛЕТКА ПРОДОЛЖАЕТСЯ!</b>\n\n"
         f"👥 В живых: <b>{len(game['players'])}</b>\n"
         f"🎯 Очередь стрелять: {get_mention(next_player['id'], next_player['name'])}\n\n"
-        f"<i>Жмите кнопку, чтобы выстрелить:</i>"
+        f"<i>Жмите кнопку для выстрела:</i>"
     )
     await call.message.answer(text, reply_markup=roulette_shoot_keyboard(game_id), parse_mode="HTML")
-
 
 @dp.message(Command("ref"))
 async def cmd_ref(message: Message):
