@@ -39,7 +39,10 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# 🖼 Надежные баннеры для исходов игр
+# Кошелек для приема пополнений в GRAM / TON
+GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
+
+# Надежные картинки
 IMG_WIN = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=800&auto=format&fit=crop&q=80"
 IMG_LOSS = "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=800&auto=format&fit=crop&q=80"
 IMG_DRAW = "https://images.unsplash.com/photo-1511193311914-0346f16efe90?w=800&auto=format&fit=crop&q=80"
@@ -54,6 +57,7 @@ active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
 active_clan_invites: Dict[str, dict] = {}
 active_withdraws: Dict[str, dict] = {}
+active_gram_invoices: Dict[str, dict] = {}
 chat_recent_users: Dict[int, List[int]] = {}
 
 
@@ -63,9 +67,11 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
+    """Надежная отправка результата игры"""
     try:
         await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
-    except Exception:
+    except Exception as e:
+        logging.warning(f"Ошибка отправки фото ({e}). Отправка обычным текстом.")
         await message.answer(text=caption, parse_mode="HTML", reply_markup=reply_markup)
 
 
@@ -142,6 +148,7 @@ class Database:
                     draws INT DEFAULT 0,
                     warns INT DEFAULT 0,
                     has_deposited BOOLEAN DEFAULT FALSE,
+                    last_stars_deposit TIMESTAMP DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS clans (
@@ -157,6 +164,14 @@ class Database:
                     amount BIGINT,
                     stars_amount INT,
                     target_username TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS gram_deposits (
+                    invoice_id TEXT PRIMARY KEY,
+                    user_id BIGINT,
+                    gram_amount NUMERIC,
+                    coins_amount BIGINT,
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -180,6 +195,7 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS clan_id INT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS has_deposited BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS last_stars_deposit TIMESTAMP DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS stars_amount INT DEFAULT 0;
                 ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS target_username TEXT DEFAULT '';
@@ -209,7 +225,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, clan_id, has_deposited, created_at FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, clan_id, has_deposited, last_stars_deposit, created_at FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -399,6 +415,14 @@ def withdraw_admin_keyboard(req_id: str):
     return builder.as_markup()
 
 
+def gram_admin_keyboard(inv_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подтвердить поступление", callback_data=f"g_ok_{inv_id}")
+    builder.button(text="❌ Отклонить", callback_data=f"g_no_{inv_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 LADDER_STEPS = {0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5}
 
 
@@ -455,12 +479,13 @@ async def cmd_start(message: Message, command: CommandObject):
         f"🛡 <code>/clan</code> — карточка клана\n"
         f"🚩 <code>/create_clan [имя]</code> — создать клан (2500 💰)\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
-        f"⭐ <b>Вывод Telegram Stars:</b>\n"
+        f"💳 <b>Пополнение и Вывод:</b>\n"
+        f"💎 <code>/gram [кол-во]</code> — пополнить через Gram / TON\n"
+        f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>/withdraw [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🧧 <code>/check [сумма] [людей]</code> — раздать чек в чат\n"
         f"🌧 <code>/rain [сумма] [людей]</code> — денежный дождь\n"
         f"🤝 <code>/ref</code> — реферальная ссылка (3%)\n"
-        f"⭐ <code>/stars [кол-во]</code> — пополнить за Stars\n"
         f"💸 <code>/pay [сумма]</code> (ответом) — передать монеты\n"
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
@@ -490,7 +515,7 @@ async def cmd_profile(message: Message):
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         user = await db.get_user(user_id)
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, clan_id, has_dep, reg_date = user
+    _, name, balance, turnover, wins, losses, draws, warns, _, clan_id, has_dep, last_stars, reg_date = user
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
 
@@ -511,7 +536,7 @@ async def cmd_profile(message: Message):
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
         f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
         f"┣ 📈 <b>Винрейт:</b> <code>{winrate}%</code>\n"
-        f"┣ 💳 <b>Статус вывода:</b> {dep_status}\n"
+        f"┣ 💳 <b>Статус:</b> {dep_status}\n"
         f"┗ ⚠️ <b>Варны:</b> <code>{warns}/3</code>"
     )
     await message.answer(text, parse_mode="HTML")
@@ -552,7 +577,131 @@ async def cmd_pay(message: Message, command: CommandObject):
     )
 
 
-# ================= ⭐ ВЫВОД STARS (КУРС 10:1, ХОЛД 21 ДЕНЬ) =================
+# ================= 💎 ПОПОЛНЕНИЕ GRAM / TON =================
+@dp.message(Command("gram"))
+@dp.message(Command("ton"))
+async def cmd_gram(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+
+    gram_amount = 1.0
+    if command.args:
+        try:
+            gram_amount = float(command.args.replace(",", "."))
+        except ValueError:
+            return await message.answer("❌ Укажите количество Gram: <code>/gram 5</code>", parse_mode="HTML")
+
+    if gram_amount < 0.1:
+        return await message.answer("❌ Минимальная сумма пополнения: 0.1 Gram!")
+
+    coins_amount = int(gram_amount * 1000)
+    invoice_id = f"G_{uuid.uuid4().hex[:6]}"
+
+    active_gram_invoices[invoice_id] = {
+        "user_id": user_id,
+        "gram_amount": gram_amount,
+        "coins_amount": coins_amount
+    }
+
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO gram_deposits (invoice_id, user_id, gram_amount, coins_amount, status) VALUES ($1, $2, $3, $4, 'pending')",
+            invoice_id, user_id, gram_amount, coins_amount
+        )
+
+    ton_link = f"ton://transfer/{GRAM_WALLET}?amount={int(gram_amount * 1e9)}&text={invoice_id}"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💎 Оплатить {gram_amount} GRAM", url=ton_link)
+    builder.button(text="✅ Я оплатил", callback_data=f"g_check_{invoice_id}")
+    builder.adjust(1)
+
+    text = (
+        f"💎 <b>ПОПОЛНЕНИЕ ЧЕРЕЗ GRAM / TON</b>\n\n"
+        f"💰 Вы получите: <b>+{coins_amount} монет</b> (без холда!)\n"
+        f"💵 К оплате: <code>{gram_amount} GRAM</code> (или TON)\n\n"
+        f"📍 <b>Адрес кошелька:</b>\n<code>{GRAM_WALLET}</code>\n\n"
+        f"📝 <b>ОБЯЗАТЕЛЬНЫЙ комментарий (MEMO):</b>\n<code>{invoice_id}</code>\n\n"
+        f"⚠️ <i>Обязательно укажите комментарий <code>{invoice_id}</code> при переводе! После оплаты нажмите кнопку «Я оплатил».</i>"
+    )
+    await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("g_check_"))
+async def cb_gram_check(call: CallbackQuery):
+    inv_id = call.data.replace("g_check_", "")
+    async with db.pool.acquire() as conn:
+        dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
+        if not dep:
+            return await call.answer("❌ Заявка не найдена!", show_alert=True)
+
+        if dep["status"] == "completed":
+            return await call.answer("✅ Этот платеж уже зачислен!", show_alert=True)
+
+    await call.answer("⏳ Запрос на проверку отправлен администраторам!", show_alert=True)
+    await call.message.edit_text("⏳ <b>Платеж на проверке!</b> Монеты будут зачислены после подтверждения транзакции в блокчейне.", parse_mode="HTML")
+
+    if OWNER_ID:
+        admin_text = (
+            f"💎 <b>НОВОЕ ПОПОЛНЕНИЕ GRAM/TON!</b>\n\n"
+            f"👤 Игрок: {get_mention(dep['user_id'], call.from_user.full_name)} (ID: <code>{dep['user_id']}</code>)\n"
+            f"💵 Сумма: <b>{dep['gram_amount']} GRAM</b>\n"
+            f"💰 К начислению: <b>{dep['coins_amount']} 💰</b>\n"
+            f"📝 Memo/Инвойс: <code>{inv_id}</code>"
+        )
+        try:
+            await bot.send_message(
+                chat_id=OWNER_ID,
+                text=admin_text,
+                reply_markup=gram_admin_keyboard(inv_id),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление о Gram: {e}")
+
+
+@dp.callback_query(F.data.startswith("g_ok_"))
+async def cb_gram_approve(call: CallbackQuery):
+    if not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Нет прав!", show_alert=True)
+
+    inv_id = call.data.replace("g_ok_", "")
+    async with db.pool.acquire() as conn:
+        dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
+        if not dep or dep["status"] != "pending":
+            return await call.answer("❌ Заявка уже обработана!", show_alert=True)
+
+        await conn.execute("UPDATE gram_deposits SET status = 'completed' WHERE invoice_id = $1", inv_id)
+        await db.change_balance(dep["user_id"], int(dep["coins_amount"]))
+        await conn.execute("UPDATE users SET has_deposited = TRUE WHERE user_id = $1", dep["user_id"])
+
+    try:
+        await bot.send_message(
+            chat_id=dep["user_id"],
+            text=f"🎉 <b>Платеж GRAM подтвержден!</b>\n💰 Начислено: <b>+{dep['coins_amount']} 💰</b> (без холда)",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await call.message.edit_text(f"{call.message.text}\n\n<b>✅ ЗАЧИСЛЕНО админом {get_mention(call.from_user.id, call.from_user.full_name)}</b>", parse_mode="HTML")
+    await call.answer("✅ Монеты зачислены!")
+
+
+@dp.callback_query(F.data.startswith("g_no_"))
+async def cb_gram_reject(call: CallbackQuery):
+    if not await db.is_admin(call.from_user.id):
+        return await call.answer("❌ Нет прав!", show_alert=True)
+
+    inv_id = call.data.replace("g_no_", "")
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE gram_deposits SET status = 'rejected' WHERE invoice_id = $1", inv_id)
+
+    await call.message.edit_text(f"{call.message.text}\n\n<b>❌ ОТКЛОНЕНО</b>", parse_mode="HTML")
+    await call.answer("❌ Заявка отклонена.")
+
+
+# ================= ⭐ ВЫВОД STARS (КУРС 10:1, ЗАЩИТА ОТ РЕФАНДА 21 ДЕНЬ) =================
 @dp.message(Command("withdraw"))
 @dp.message(Command("out"))
 async def cmd_withdraw(message: Message, command: CommandObject):
@@ -564,7 +713,7 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             "⭐ <b>Вывод в Telegram Stars</b>\n\n"
             "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
             "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
-            "🔒 <b>Правило:</b> Если вы не делали депозит через <code>/stars</code>, вывод доступен только спустя <b>21 день</b> после регистрации.\n\n"
+            "🔒 <b>Защита от Refund:</b> Вывод доступен спустя <b>21 день</b> после последнего пополнения через Stars (на пополнения через <code>/gram</code> холд не действует).\n\n"
             "Формат: <code>/withdraw [монеты] [твой_тег]</code>\n"
             "<i>Пример:</i> <code>/withdraw 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
@@ -591,17 +740,21 @@ async def cmd_withdraw(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
 
-    has_deposited = user[10]
-    created_at = user[11] or datetime.now()
-    days_registered = (datetime.now() - created_at).days
+    # Защита от Refund: проверка 21 дня с момента депозита Stars или регистрации
+    last_stars_dep = user[11]
+    created_at = user[12] or datetime.now()
 
-    if not has_deposited and days_registered < 21:
-        days_left = 21 - days_registered
+    check_date = last_stars_dep if last_stars_dep else created_at
+    days_passed = (datetime.now() - check_date).days
+
+    if days_passed < 21:
+        days_left = 21 - days_passed
+        reason = "последнего депозита Stars (защита от рефанда Telegram)" if last_stars_dep else "регистрации"
         return await message.answer(
-            f"🔒 <b>Ограничение на вывод!</b>\n\n"
-            f"Вы ни разу не совершали депозит через <code>/stars</code>. Для пользователей без депозита вывод открывается через <b>21 день</b> с момента регистрации.\n\n"
-            f"⏳ Осталось ждать: <b>{days_left} дн.</b>\n"
-            f"💡 <i>Сделайте любое пополнение через <code>/stars</code>, чтобы снять холд навсегда!</i>",
+            f"🔒 <b>Холд безопасности активен!</b>\n\n"
+            f"В связи с правилами Telegram Stars Refund вывод средств заморожен на 21 день с момента {reason}.\n\n"
+            f"⏳ Осталось дней холда: <b>{days_left} дн.</b>\n"
+            f"💡 <i>Пополняйте баланс через <code>/gram</code> без каких-либо холдов и задержек!</i>",
             parse_mode="HTML"
         )
 
@@ -1620,7 +1773,7 @@ async def cb_decline_duel(call: CallbackQuery):
     await call.answer()
 
 
-# ================= STARS ПОПОЛНЕНИЕ =================
+# ================= STARS ПОПОЛНЕНИЕ (С ФИКСАЦИЕЙ ДАТЫ ХОЛДА) =================
 @dp.message(Command("stars"))
 @dp.message(Command("donate"))
 async def cmd_stars(message: Message, command: CommandObject):
@@ -1655,11 +1808,20 @@ async def process_successful_payment(message: Message):
         await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         await db.change_balance(message.from_user.id, coins)
         
-        # Снимаем 21-дневный холд на вывод
+        # Фиксируем дату депозита Stars (для 21-дневного холда на вывод из-за Refund)
         async with db.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET has_deposited = TRUE WHERE user_id = $1", message.from_user.id)
+            await conn.execute(
+                "UPDATE users SET has_deposited = TRUE, last_stars_deposit = CURRENT_TIMESTAMP WHERE user_id = $1",
+                message.from_user.id
+            )
 
-        await message.answer(f"🎉 <b>Оплата успешна!</b>\n⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n💰 Зачислено: <b>+{coins} монет</b>\n🔓 <b>Холд на вывод снят навсегда!</b>", parse_mode="HTML")
+        await message.answer(
+            f"🎉 <b>Оплата успешна!</b>\n"
+            f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
+            f"💰 Зачислено: <b>+{coins} монет</b>\n"
+            f"🔒 <i>Обратите внимание: вывод средств доступен через 21 день (защита Telegram Stars Refund). Для моментального вывода используйте <code>/gram</code>.</i>",
+            parse_mode="HTML"
+        )
 
 
 # ================= ТОПЫ И ПРОМОКОДЫ =================
@@ -1921,13 +2083,14 @@ async def on_startup(bot: Bot):
         BotCommand(command="under", description="Меньше (1-3) 📉"),
         BotCommand(command="even", description="Чётное число ⚖️"),
         BotCommand(command="odd", description="Нечётное число 🎲"),
+        BotCommand(command="gram", description="Пополнить через Gram / TON 💎"),
+        BotCommand(command="stars", description="Пополнить за Stars ⭐"),
         BotCommand(command="withdraw", description="Вывод в Telegram Stars ⭐"),
         BotCommand(command="check", description="Раздать чек в чат 🧧"),
         BotCommand(command="rain", description="Денежный дождь в чат 🌧"),
         BotCommand(command="profile", description="Мой профиль и баланс 👤"),
         BotCommand(command="ref", description="Реферальная ссылка (+3%) 🤝"),
         BotCommand(command="pay", description="Передать монеты 💸"),
-        BotCommand(command="stars", description="Пополнить за Stars ⭐"),
         BotCommand(command="top", description="Топ богачей 🏆"),
         BotCommand(command="promo", description="Активировать промокод 🎟"),
     ]
