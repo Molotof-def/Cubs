@@ -10,6 +10,7 @@ from typing import Dict, Optional
 import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.enums import ChatMemberStatus
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message,
@@ -34,6 +35,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL в Render.")
 
+# Имя или ID канала (например: @DuelCubesChannel или -1001234567890)
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -43,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Сессии в оперативной памяти
+# Сессии в памяти
 active_duels: Dict[str, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_miners: Dict[int, dict] = {}
@@ -55,20 +57,42 @@ def get_mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-# ================= ПРОВЕРКА ПОДПИСКИ =================
+# ================= НАДЕЖНАЯ ПРОВЕРКА ПОДПИСКИ =================
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", ""]:
+    # Владельцу бота всегда открыт доступ
+    if user_id == OWNER_ID:
         return True
+
+    # Если канал не настроен
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", "", "None"]:
+        return True
+
+    chat_target = REQUIRED_CHANNEL
+    if not chat_target.startswith("@") and not chat_target.startswith("-100") and not chat_target.startswith("-"):
+        chat_target = f"@{chat_target}"
+
     try:
-        chat_id = REQUIRED_CHANNEL if REQUIRED_CHANNEL.startswith("@") or REQUIRED_CHANNEL.startswith("-100") else f"@{REQUIRED_CHANNEL}"
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        if member.status in ["creator", "administrator", "member"]:
+        member = await bot.get_chat_member(chat_id=chat_target, user_id=user_id)
+        
+        # Получаем строковый статус
+        status_val = str(member.status).lower().replace("chatmemberstatus.", "")
+        
+        # Разрешенные статусы (создатель, админ, участник)
+        if status_val in ["creator", "administrator", "member", "owner"]:
             return True
-        if member.status == "restricted":
+            
+        if status_val == "restricted":
             return getattr(member, "is_member", False)
+            
         return False
     except Exception as e:
-        logging.error(f"Ошибка проверки подписки: {e}")
+        err_msg = str(e).lower()
+        # Если бот не является админом канала или чат не найден, не ломаем игру игрокам
+        if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
+            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Убедитесь, что бот добавлен в АДМИНИСТРАТОРЫ канала!")
+            return True
+            
+        logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
 
 
@@ -77,7 +101,17 @@ def sub_keyboard():
     clean_tag = REQUIRED_CHANNEL.replace("@", "")
     channel_url = f"https://t.me/{clean_tag}" if not REQUIRED_CHANNEL.startswith("-100") else "https://t.me/"
     builder.button(text="📢 Подписаться на канал", url=channel_url)
+    builder.button(text="🔄 Проверить подписку", callback_data="sub_check_recheck")
+    builder.adjust(1)
     return builder.as_markup()
+
+
+@dp.callback_query(F.data == "sub_check_recheck")
+async def cb_recheck_sub(call: CallbackQuery):
+    if await check_subscription(call.from_user.id):
+        await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все игры.", parse_mode="HTML")
+    else:
+        await call.answer("❌ Вы ещё не подписались на канал!", show_alert=True)
 
 
 # ================= БАЗА ДАННЫХ (POSTGRESQL) =================
@@ -126,7 +160,6 @@ class Database:
                     PRIMARY KEY (user_id, code)
                 );
             """)
-            # Автомиграция колонок
             await conn.execute("""
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT DEFAULT NULL;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
@@ -192,7 +225,8 @@ class Database:
                     )
                 except Exception:
                     pass
- # ================= МЕТОДЫ КЛАНОВ =================
+
+    # ================= КЛАНЫ =================
     async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
         async with self.pool.acquire() as conn:
             try:
@@ -247,7 +281,7 @@ class Database:
 
     async def add_admin(self, user_id: int):
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+        await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
 
     async def add_warn(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
@@ -298,8 +332,8 @@ async def auto_register_middleware(handler, event: Message, data: dict):
     if event.from_user and not event.from_user.is_bot and db.pool:
         try:
             await db.register_user(event.from_user.id, event.from_user.full_name, event.from_user.username)
-        except Exception as e:
-            logging.error(f"Middleware registration error: {e}")
+        except Exception:
+            pass
     return await handler(event, data)
 
 
@@ -378,7 +412,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"💣 <code>/miner [ставка]</code> — Кубический сапёр (1x6)\n\n"
         f"🏰 <b>Кланы и Социалка:</b>\n"
         f"🛡 <code>/clan</code> — информация о клане\n"
-        f"🚩 <code>/create_clan [имя]</code> — создать клан (250 💰)\n"
+        f"🚩 <code>/create_clan [имя]</code> — создать клан (2500 💰)\n"
         f"👥 <code>/invite_clan</code> (ответом) — пригласить в клан\n"
         f"💰 <code>/clan_deposit [сумма]</code> — пополнить казну\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
@@ -439,7 +473,7 @@ async def cmd_profile(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= КЛАНОВАЯ СИСТЕМА =================
+# ================= КЛАНОВАЯ СИСТЕМА (2500 💰) =================
 @dp.message(Command("create_clan"))
 async def cmd_create_clan(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -456,7 +490,7 @@ async def cmd_create_clan(message: Message, command: CommandObject):
     if user[9]:  # clan_id
         return await message.answer("❌ Вы уже состоите в клане! Сначала покиньте его через /leave_clan.")
 
-    creation_cost = 250
+    creation_cost = 2500
     if user[2] < creation_cost:
         return await message.answer(f"❌ Создание клана стоит <b>{creation_cost} 💰</b>. У вас: {user[2]} 💰", parse_mode="HTML")
 
@@ -475,7 +509,7 @@ async def cmd_clan(message: Message):
     user_id = message.from_user.id
     user = await db.get_user(user_id)
     if not user or not user[9]:
-        return await message.answer("🛡 Вы не состоите в клане. Создайте свой: <code>/create_clan [Название]</code> (250 💰)", parse_mode="HTML")
+        return await message.answer("🛡 Вы не состоите в клане. Создайте свой: <code>/create_clan [Название]</code> (2500 💰)", parse_mode="HTML")
 
     clan = await db.get_clan(user[9])
     if not clan:
@@ -725,7 +759,6 @@ async def cmd_dice(message: Message, command: CommandObject):
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
         return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
-
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
 
@@ -817,7 +850,6 @@ async def cmd_double_dice(message: Message, command: CommandObject):
 async def cmd_over(message: Message, command: CommandObject):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
@@ -937,7 +969,8 @@ async def cmd_odd(message: Message, command: CommandObject):
 
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
-        bet = 15
+
+    bet = 15
     if command.args and command.args.isdigit():
         bet = int(command.args)
     if bet <= 0:
@@ -1040,7 +1073,7 @@ async def cb_miner_roll(call: CallbackQuery):
     await asyncio.sleep(4.0)
     rolled_cell = dice_msg.dice.value
 
-    # Попадание на мину
+    # Мина
     if rolled_cell == game["mine"]:
         bet = game["bet"]
         del active_miners[user_id]
@@ -1069,7 +1102,7 @@ async def cb_miner_roll(call: CallbackQuery):
         )
         return await call.message.answer(res, reply_markup=miner_keyboard(user_id, current_mult, next_mult), parse_mode="HTML")
 
-    # Новая чистая клетка
+    # Новая клетка
     game["opened"].add(rolled_cell)
     game["step"] += 1
     game["is_rolling"] = False
@@ -1118,7 +1151,6 @@ async def cb_miner_cash(call: CallbackQuery):
     game = active_miners[user_id]
     mult = MINER_MULTS[game["step"]]
     win = int(game["bet"] * mult)
-
     del active_miners[user_id]
     await db.change_balance(user_id, win)
     await db.record_game(user_id, "win" if mult >= 1.0 else "loss")
@@ -1346,12 +1378,13 @@ async def cmd_top(message: Message):
 async def cmd_add_promo(message: Message, command: CommandObject):
     if not await db.is_admin(message.from_user.id):
         return
+
     if not command.args or len(command.args.split()) < 3:
         return await message.answer("Формат: <code>/add_promo [КОД] [НАГРАДА] [КОЛ-ВО]</code>", parse_mode="HTML")
 
     code, reward_str, uses_str = command.args.split()
     if not reward_str.isdigit() or not uses_str.isdigit():
-        return await message.answer("❌ Награда и количество должны быть числами!", parse_mode="HTML")
+        return await message.answer("❌ Награда и количество должны быть числами!")
 
     ok = await db.create_promo(code, int(reward_str), int(uses_str))
     if ok:
@@ -1526,15 +1559,18 @@ async def cmd_unban(message: Message, command: CommandObject):
         await message.chat.unban(user_id=target_id, only_if_banned=True)
         await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка разбана (проверьте права бота): {e}")
+        await message.answer(f"❌ Ошибка разбана: {e}")
 
 
 @dp.message(Command("warn"))
 async def cmd_warn(message: Message):
-    if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+    if not await db.is_admin(message.from_user.id):
         return
 
-    target = message.reply_to_message.from_user
+    target = message.reply_to_message.from_user if message.reply_to_message else None
+    if not target:
+        return await message.answer("❌ Ответьте на сообщение нарушителя!")
+
     if target.id == OWNER_ID or await db.is_admin(target.id):
         return await message.answer("❌ Нельзя выдать варн администратору!")
 
@@ -1572,7 +1608,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
         BotCommand(command="miner", description="Кубический сапёр 1x6 💣"),
         BotCommand(command="clan", description="Мой клан 🛡"),
-        BotCommand(command="create_clan", description="Создать клан (250 💰) 🚩"),
+        BotCommand(command="create_clan", description="Создать клан (2500 💰) 🚩"),
         BotCommand(command="clan_top", description="Топ кланов 🏰"),
         BotCommand(command="over", description="Больше (4-6) 📈"),
         BotCommand(command="under", description="Меньше (1-3) 📉"),
