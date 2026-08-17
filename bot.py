@@ -4,7 +4,7 @@ import logging
 import random
 import html
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
 import asyncpg
@@ -32,18 +32,17 @@ OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else 0
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL в Render.")
+    exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 
-# 🖼 Надежные высококачественные ссылки на картинки
+# 🖼 Надежные баннеры для исходов игр
 IMG_WIN = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=800&auto=format&fit=crop&q=80"
 IMG_LOSS = "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=800&auto=format&fit=crop&q=80"
 IMG_DRAW = "https://images.unsplash.com/photo-1511193311914-0346f16efe90?w=800&auto=format&fit=crop&q=80"
-IMG_THRONE = "https://images.unsplash.com/photo-1589829545856-d10d557cf95f?w=800&auto=format&fit=crop&q=80"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
@@ -55,7 +54,6 @@ active_checks: Dict[str, dict] = {}
 active_ladders: Dict[int, dict] = {}
 active_clan_invites: Dict[str, dict] = {}
 active_withdraws: Dict[str, dict] = {}
-chat_thrones: Dict[int, dict] = {}  # Царь горы для каждого чата
 chat_recent_users: Dict[int, List[int]] = {}
 
 
@@ -65,7 +63,6 @@ def get_mention(user_id: int, name: str) -> str:
 
 
 async def send_game_result(message: Message, photo_url: str, caption: str, reply_markup=None):
-    """Отправка карточки с фото либо текстом в случае недоступности CDN"""
     try:
         await message.answer_photo(photo=photo_url, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
     except Exception:
@@ -96,7 +93,7 @@ async def check_subscription(user_id: int) -> bool:
     except Exception as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
-            logging.error(f"⚠️ Бот должен быть АДМИНИСТРАТОРОМ канала {chat_target}! Пропуск проверки.")
+            logging.error(f"⚠️ Ошибка проверки канала {chat_target}: {e}. Бот должен быть АДМИНОМ канала!")
             return True
         logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
@@ -162,16 +159,6 @@ class Database:
                     target_username TEXT,
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS user_quests (
-                    user_id BIGINT PRIMARY KEY,
-                    quest_date DATE,
-                    bot_games INT DEFAULT 0,
-                    bot_claimed BOOLEAN DEFAULT FALSE,
-                    duels_played INT DEFAULT 0,
-                    duels_claimed BOOLEAN DEFAULT FALSE,
-                    ladder_steps INT DEFAULT 0,
-                    ladder_claimed BOOLEAN DEFAULT FALSE
                 );
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
@@ -259,49 +246,6 @@ class Database:
                         pass
         except Exception as e:
             logging.error(f"Error in referral processing: {e}")
-
-    # ================= КВЕСТЫ =================
-    async def get_or_reset_quests(self, user_id: int):
-        today = date.today()
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM user_quests WHERE user_id = $1", user_id)
-            if not row or row["quest_date"] != today:
-                await conn.execute("""
-                    INSERT INTO user_quests (user_id, quest_date, bot_games, bot_claimed, duels_played, duels_claimed, ladder_steps, ladder_claimed)
-                    VALUES ($1, $2, 0, FALSE, 0, FALSE, 0, FALSE)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        quest_date = EXCLUDED.quest_date,
-                        bot_games = 0, bot_claimed = FALSE,
-                        duels_played = 0, duels_claimed = FALSE,
-                        ladder_steps = 0, ladder_claimed = FALSE
-                """, user_id, today)
-                row = await conn.fetchrow("SELECT * FROM user_quests WHERE user_id = $1", user_id)
-            return dict(row)
-
-    async def add_quest_progress(self, user_id: int, quest_type: str, amount: int = 1):
-        try:
-            await self.get_or_reset_quests(user_id)
-            col = "bot_games" if quest_type == "bot" else ("duels_played" if quest_type == "duel" else "ladder_steps")
-            async with self.pool.acquire() as conn:
-                await conn.execute(f"UPDATE user_quests SET {col} = {col} + $1 WHERE user_id = $2", amount, user_id)
-        except Exception as e:
-            logging.error(f"Error adding quest progress: {e}")
-
-    async def claim_quest_reward(self, user_id: int, quest_type: str) -> tuple[bool, str]:
-        q = await self.get_or_reset_quests(user_id)
-        rewards = {"bot": (5, 100, "bot_games", "bot_claimed"), "duel": (3, 150, "duels_played", "duels_claimed"), "ladder": (3, 200, "ladder_steps", "ladder_claimed")}
-        req_count, reward, count_col, claimed_col = rewards[quest_type]
-
-        if q[claimed_col]:
-            return False, "❌ Вы уже забрали награду за этот квест сегодня!"
-        if q[count_col] < req_count:
-            return False, f"❌ Квест ещё не выполнен! ({q[count_col]}/{req_count})"
-
-        async with self.pool.acquire() as conn:
-            await conn.execute(f"UPDATE user_quests SET {claimed_col} = TRUE WHERE user_id = $1", user_id)
-            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
-
-        return True, f"🎉 <b>Награда получена: +{reward} 💰!</b>"
 
     # ================= КЛАНЫ =================
     async def create_clan(self, owner_id: int, name: str) -> Optional[int]:
@@ -455,19 +399,6 @@ def withdraw_admin_keyboard(req_id: str):
     return builder.as_markup()
 
 
-def quests_keyboard(q: dict):
-    builder = InlineKeyboardBuilder()
-    b_txt = "✅ Забрано" if q["bot_claimed"] else ("🎁 Забрать 100 💰" if q["bot_games"] >= 5 else f"⏳ {q['bot_games']}/5")
-    d_txt = "✅ Забрано" if q["duels_claimed"] else ("🎁 Забрать 150 💰" if q["duels_played"] >= 3 else f"⏳ {q['duels_played']}/3")
-    l_txt = "✅ Забрано" if q["ladder_claimed"] else ("🎁 Забрать 200 💰" if q["ladder_steps"] >= 3 else f"⏳ {q['ladder_steps']}/3")
-
-    builder.button(text=f"1. Игры с ботом: {b_txt}", callback_data="claim_q_bot")
-    builder.button(text=f"2. Дуэли 1v1: {d_txt}", callback_data="claim_q_duel")
-    builder.button(text=f"3. Лесенка: {l_txt}", callback_data="claim_q_ladder")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 LADDER_STEPS = {0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5}
 
 
@@ -511,8 +442,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"🎲 <b>Добро пожаловать в Dice Club!</b>\n\n"
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
-        f"📜 <b>Режимы игр:</b>\n"
-        f"👑 <code>/king [ставка]</code> — Царь Горы (Битва за трон чата) 🔥\n"
+        f"📜 <b>Режимы игр (мин. ставка 100 💰):</b>\n"
         f"⚔️ <code>/duel [ставка]</code> — дуэль 1 на 1 в чате\n"
         f"🎲 <code>/dice [ставка]</code> — бросок против бота\n"
         f"🎲🎲 <code>/doubledice [ставка]</code> — 2 кубика (х3 за дубль)\n"
@@ -521,8 +451,7 @@ async def cmd_start(message: Message, command: CommandObject):
         f"📉 <code>/under [ставка]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>/even [ставка]</code> — Чётное число\n"
         f"🎲 <code>/odd [ставка]</code> — Нечётное число\n\n"
-        f"🎯 <b>Задания и Кланы:</b>\n"
-        f"🎯 <code>/quests</code> — Ежедневные задания с наградами\n"
+        f"🏰 <b>Кланы и Социалка:</b>\n"
         f"🛡 <code>/clan</code> — карточка клана\n"
         f"🚩 <code>/create_clan [имя]</code> — создать клан (2500 💰)\n"
         f"🏆 <code>/clan_top</code> — топ кланов по казне\n\n"
@@ -536,208 +465,6 @@ async def cmd_start(message: Message, command: CommandObject):
         f"👤 <code>/profile</code> | 🏆 <code>/top</code> | 🎟 <code>/promo [код]</code>"
     )
     await message.answer(text, parse_mode="HTML")
-
-
-# ================= 👑 РЕЖИМ ЦАРЬ ГОРЫ (/king, /throne) =================
-@dp.message(Command("king"))
-@dp.message(Command("throne"))
-async def cmd_king(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    if message.chat.type not in ["group", "supergroup"]:
-        return await message.answer("❌ Режим «Царь Горы» доступен только в групповых чатах!")
-
-    if not await check_subscription(user_id):
-        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
-
-    throne = chat_thrones.get(chat_id)
-
-    # Если трон свободен
-    if not throne:
-        bet = 50
-        if command.args and command.args.isdigit():
-            bet = int(command.args)
-        if bet < 50:
-            return await message.answer("❌ Минимальная ставка для захвата трона: <b>50 💰</b>", parse_mode="HTML")
-
-        user = await db.get_user(user_id)
-        if not user or user[2] < bet:
-            return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
-
-        await db.change_balance(user_id, -bet)
-        await db.add_turnover(user_id, bet)
-
-        chat_thrones[chat_id] = {
-            "king_id": user_id,
-            "king_name": message.from_user.full_name,
-            "bank": bet,
-            "defended_count": 0,
-            "taken_at": datetime.now()
-        }
-
-        text = (
-            f"👑 <b>ТРОН ЧАТА ЗАХВАЧЕН!</b>\n\n"
-            f"👑 Новый Царь: {get_mention(user_id, message.from_user.full_name)}\n"
-            f"💰 Казна Трона: <b>{bet} 💰</b>\n"
-            f"🛡 Успешных защит: <b>0</b>\n\n"
-            f"<i>Любой желающий может попытаться свергнуть Царя командой:</i>\n"
-            f"👉 <code>/attack [ставка]</code>"
-        )
-        return await send_game_result(message, IMG_THRONE, text)
-
-    # Если трон уже занят — выводим статус
-    k_id, k_name, bank, defs = throne["king_id"], throne["king_name"], throne["bank"], throne["defended_count"]
-    text = (
-        f"👑 <b>ТЕКУЩИЙ ЦАРЬ ГОРИ</b>\n\n"
-        f"👑 Владыка: {get_mention(k_id, k_name)}\n"
-        f"💰 Банк Трона: <b>{bank} 💰</b>\n"
-        f"🛡 Отбитых атак: <b>{defs}</b>\n\n"
-        f"⚔️ <i>Чтобы бросить вызов и забрать весь банк:</i>\n"
-        f"👉 <code>/attack [ставка от {max(50, bank // 2)}]</code>"
-    )
-    await send_game_result(message, IMG_THRONE, text)
-
-
-@dp.message(Command("attack"))
-async def cmd_attack_throne(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    if message.chat.type not in ["group", "supergroup"]:
-        return await message.answer("❌ Битвы за трон доступны только в групповых чатах!")
-
-    if not await check_subscription(user_id):
-        return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
-
-    throne = chat_thrones.get(chat_id)
-    if not throne:
-        return await message.answer("👑 Трон сейчас свободен! Займите его: <code>/king [ставка]</code>", parse_mode="HTML")
-
-    if throne["king_id"] == user_id:
-        return await message.answer("👑 Вы и так являетесь действующим Царём Горы!")
-
-    min_attack = max(50, throne["bank"] // 2)
-    bet = min_attack
-    if command.args and command.args.isdigit():
-        bet = int(command.args)
-
-    if bet < min_attack:
-        return await message.answer(f"❌ Минимальная ставка для атаки на этот трон: <b>{min_attack} 💰</b>", parse_mode="HTML")
-
-    user = await db.get_user(user_id)
-    if not user or user[2] < bet:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
-
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
-
-    k_id, k_name = throne["king_id"], throne["king_name"]
-
-    await message.answer(
-        f"⚔️ {get_mention(user_id, message.from_user.full_name)} бросил вызов Царю {get_mention(k_id, k_name)} за Трон!\n"
-        f"Ставка атаки: <b>{bet} 💰</b>",
-        parse_mode="HTML"
-    )
-
-    await message.answer(f"🔴 Бросает Претендент {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
-    att_dice = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    att_val = att_dice.dice.value
-
-    await message.answer(f"👑 Бросает Царь {get_mention(k_id, k_name)}:", parse_mode="HTML")
-    king_dice = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    king_val = king_dice.dice.value
-
-    # Претендент победил — свержение!
-    if att_val > king_val:
-        win_bank = throne["bank"] + bet
-        await db.change_balance(user_id, win_bank)
-        await db.record_game(user_id, "win")
-        await db.record_game(k_id, "loss")
-
-        # Новый царь
-        chat_thrones[chat_id] = {
-            "king_id": user_id,
-            "king_name": message.from_user.full_name,
-            "bank": bet,
-            "defended_count": 0,
-            "taken_at": datetime.now()
-        }
-
-        res = (
-            f"👑 <b>СВЕРЖЕНИЕ ЦАРЯ!</b> ({att_val} > {king_val})\n\n"
-            f"🎉 Претендент {get_mention(user_id, message.from_user.full_name)} одолел {get_mention(k_id, k_name)}!\n"
-            f"💰 Забран весь куш трона: <b>+{win_bank} 💰</b>\n"
-            f"🏰 Теперь он новый Царь Горы!"
-        )
-        return await send_game_result(message, IMG_WIN, res)
-
-    # Царь отбился — пополнение банка трона!
-    elif king_val > att_val:
-        throne["bank"] += bet
-        throne["defended_count"] += 1
-        await db.record_game(k_id, "win")
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
-
-        res = (
-            f"🛡 <b>ЦАРЬ ОТБИЛ АТАКУ!</b> ({king_val} > {att_val})\n\n"
-            f"👑 {get_mention(k_id, k_name)} удержал власть против {get_mention(user_id, message.from_user.full_name)}!\n"
-            f"💰 Казна Трона пополнена на <b>+{bet} 💰</b> (Всего: <b>{throne['bank']} 💰</b>)"
-        )
-        return await send_game_result(message, IMG_LOSS, res)
-
-    # Ничья
-    else:
-        await db.change_balance(user_id, bet)
-        await db.record_game(user_id, "draw")
-        await db.record_game(k_id, "draw")
-        res = (
-            f"⚖️ <b>РАВНЫЙ БОЙ НА ТРОНЕ! ({att_val} = {king_val})</b>\n\n"
-            f"Царь остаётся на троне, ставка возвращена претенденту."
-        )
-        return await send_game_result(message, IMG_DRAW, res)
-
-
-# ================= 🎯 ЕЖЕДНЕВНЫЕ КВЕСТЫ (/quests) =================
-@dp.message(Command("quests"))
-@dp.message(Command("tasks"))
-async def cmd_quests(message: Message):
-    user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-    q = await db.get_or_reset_quests(user_id)
-
-    text = (
-        f"🎯 <b>ЕЖЕДНЕВНЫЕ КВЕСТЫ</b>\n\n"
-        f"Выполняйте задания каждый день и забирайте монеты:\n\n"
-        f"1️⃣ <b>Азартный игрок</b> (Игры против бота)\n"
-        f"Прогресс: <code>{q['bot_games']}/5</code> | Награда: <b>100 💰</b>\n\n"
-        f"2️⃣ <b>Гладиатор чата</b> (Дуэли 1v1 с игроками)\n"
-        f"Прогресс: <code>{q['duels_played']}/3</code> | Награда: <b>150 💰</b>\n\n"
-        f"3️⃣ <b>Покоритель высот</b> (Шаги в /ladder)\n"
-        f"Прогресс: <code>{q['ladder_steps']}/3</code> | Награда: <b>200 💰</b>\n\n"
-        f"<i>Нажмите на кнопку ниже, чтобы забрать выполненную награду:</i>"
-    )
-    await message.answer(text, reply_markup=quests_keyboard(q), parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("claim_q_"))
-async def cb_claim_quest(call: CallbackQuery):
-    quest_type = call.data.replace("claim_q_", "")
-    ok, msg = await db.claim_quest_reward(call.from_user.id, quest_type)
-    if ok:
-        await call.answer(msg, show_alert=True)
-        q = await db.get_or_reset_quests(call.from_user.id)
-        try:
-            await call.message.edit_reply_markup(reply_markup=quests_keyboard(q))
-        except Exception:
-            pass
-    else:
-        await call.answer(msg, show_alert=True)
 
 
 @dp.message(Command("ref"))
@@ -802,7 +529,7 @@ async def cmd_pay(message: Message, command: CommandObject):
         return await message.answer("❌ Нельзя переводить монеты самому себе!")
 
     if not command.args or not command.args.isdigit():
-        return await message.answer("❌ Формат: <code>/pay 50</code>", parse_mode="HTML")
+        return await message.answer("❌ Формат: <code>/pay 100</code>", parse_mode="HTML")
 
     amount = int(command.args)
     if amount <= 0:
@@ -962,7 +689,7 @@ async def cb_withdraw_reject(call: CallbackQuery):
     req_id = call.data.replace("wd_no_", "")
 
     async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, target_username, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
         if not req or req["status"] != "pending":
             return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
 
@@ -1001,11 +728,11 @@ async def cmd_ladder(message: Message, command: CommandObject):
     if user_id in active_ladders:
         return await message.answer("❌ У вас уже начата игра в Лесенку! Завершите её.")
 
-    bet = 20
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка в Лесенке: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1076,8 +803,6 @@ async def cb_ladder_step(call: CallbackQuery):
     game["is_rolling"] = False
     step = game["step"]
     mult = LADDER_STEPS[step]
-
-    await db.add_quest_progress(user_id, "ladder", 1)
 
     # Достигнута вершина (5 ступень x7.5)
     if step >= 5:
@@ -1159,8 +884,8 @@ async def cmd_rain(message: Message, command: CommandObject):
     total_amount = int(args[0])
     people_count = int(args[1])
 
-    if total_amount < people_count or people_count <= 0:
-        return await message.answer("❌ Некорректная сумма или количество участников!")
+    if total_amount < people_count or people_count <= 0 or total_amount < 100:
+        return await message.answer("❌ Минимальная сумма дождя: 100 💰!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < total_amount:
@@ -1394,8 +1119,8 @@ async def cmd_check(message: Message, command: CommandObject):
         return await message.answer("❌ Сумма и количество человек должны быть числами!", parse_mode="HTML")
 
     total_amount, people_count = int(args[0]), int(args[1])
-    if total_amount < people_count or people_count <= 0:
-        return await message.answer("❌ Некорректная сумма или количество!", parse_mode="HTML")
+    if total_amount < people_count or people_count <= 0 or total_amount < 100:
+        return await message.answer("❌ Минимальная сумма чека: 100 💰!", parse_mode="HTML")
 
     user = await db.get_user(user_id)
     if not user or user[2] < total_amount:
@@ -1462,7 +1187,7 @@ async def cb_claim_check(call: CallbackQuery):
         await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, claimed_count, total_people))
 
 
-# ================= ОДИНОЧНЫЕ КУБИКИ (С КАРТИНКАМИ) =================
+# ================= ОДИНОЧНЫЕ ИГРЫ (МИН. СТАВКА 100 💰) =================
 @dp.message(Command("dice"))
 async def cmd_dice(message: Message, command: CommandObject):
     user_id = message.from_user.id
@@ -1471,11 +1196,11 @@ async def cmd_dice(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1483,7 +1208,6 @@ async def cmd_dice(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 Бросок {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
     p_msg = await message.answer_dice(emoji="🎲")
@@ -1524,11 +1248,11 @@ async def cmd_double_dice(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 20
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1536,7 +1260,6 @@ async def cmd_double_dice(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)}:</b>", parse_mode="HTML")
     p_d1 = await message.answer_dice(emoji="🎲")
@@ -1586,11 +1309,11 @@ async def cmd_over(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1598,7 +1321,6 @@ async def cmd_over(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>БОЛЬШЕ (4-6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1629,11 +1351,11 @@ async def cmd_under(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1641,7 +1363,6 @@ async def cmd_under(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>МЕНЬШЕ (1-3)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1672,11 +1393,11 @@ async def cmd_even(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1684,7 +1405,6 @@ async def cmd_even(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>ЧЁТНОЕ (2, 4, 6)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1715,11 +1435,11 @@ async def cmd_odd(message: Message, command: CommandObject):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
 
     user = await db.get_user(user_id)
     if not user or user[2] < bet:
@@ -1727,7 +1447,6 @@ async def cmd_odd(message: Message, command: CommandObject):
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
-    await db.add_quest_progress(user_id, "bot", 1)
 
     await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>НЕЧЁТНОЕ (1, 3, 5)</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
@@ -1767,11 +1486,11 @@ async def cmd_duel(message: Message, command: CommandObject):
     if opponent.id == challenger.id:
         return await message.answer("❌ Нельзя играть с самим собой!")
 
-    bet = 15
+    bet = 100
     if command.args and command.args.isdigit():
         bet = int(command.args)
-    if bet <= 0:
-        return await message.answer("❌ Ставка должна быть больше 0!")
+    if bet < 100:
+        return await message.answer("❌ Минимальная ставка для дуэли: <b>100 💰</b>!")
 
     await db.register_user(opponent.id, opponent.full_name, opponent.username)
 
@@ -1845,9 +1564,6 @@ async def cb_accept_duel(call: CallbackQuery):
     await db.change_balance(o_id, -bet)
     await db.add_turnover(c_id, bet)
     await db.add_turnover(o_id, bet)
-
-    await db.add_quest_progress(c_id, "duel", 1)
-    await db.add_quest_progress(o_id, "duel", 1)
 
     await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{bet} 💰</b>", parse_mode="HTML")
 
@@ -2194,12 +1910,10 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="king", description="Царь Горы (Трон чата) 👑"),
-        BotCommand(command="dice", description="Кубик против бота 🤖"),
+        BotCommand(command="dice", description="Кубик против бота (от 100 💰) 🤖"),
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
-        BotCommand(command="quests", description="Ежедневные задания 🎯"),
         BotCommand(command="clan", description="Мой клан 🛡"),
         BotCommand(command="create_clan", description="Создать клан (2500 💰) 🚩"),
         BotCommand(command="clan_top", description="Топ кланов 🏰"),
