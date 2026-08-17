@@ -281,7 +281,7 @@ class Database:
 
     async def add_admin(self, user_id: int):
         async with self.pool.acquire() as conn:
-        await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+            await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
 
     async def add_warn(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
