@@ -228,7 +228,7 @@ class Database:
                 await conn.execute("""
                     INSERT INTO chat_members (chat_id, user_id)
                     VALUES ($1, $2)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (chat_id, user_id) DO NOTHING
                 """, chat_id, user_id)
 
     async def get_user_id_by_username(self, tg_username: str):
@@ -413,7 +413,6 @@ def ladder_keyboard(user_id: int, step: int):
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СТАВОК =================
 def resolve_bet_amount(arg_val: Optional[str], current_balance: int) -> Optional[int]:
-    """Разбирает ставку: число, 'вабанк', 'все', 'всё', 'all', 'full', 'макс'"""
     if not arg_val:
         return 100
     
@@ -467,15 +466,22 @@ async def process_chat_stats_cmd(message: Message):
     if message.chat.type not in ["group", "supergroup"]:
         return await message.answer("❌ Статистика чата доступна только в группах!")
 
+    await db.register_user(
+        message.from_user.id,
+        message.from_user.full_name,
+        message.from_user.username,
+        chat_id=message.chat.id
+    )
+
     stats, top_player = await db.get_chat_stats(message.chat.id)
     if not stats or stats["total_players"] == 0:
         return await message.answer("📊 В этом чате пока нет зарегистрированных игроков.")
 
-    total_games = stats["total_wins"] + stats["total_losses"]
+    total_games = int(stats["total_wins"]) + int(stats["total_losses"])
     winrate = round((stats["total_wins"] / total_games * 100), 1) if total_games > 0 else 0
 
-    top_text = "Нет"
-    if top_player:
+    top_text = "<i>Пока нет</i>"
+    if top_player and top_player["user_id"]:
         top_text = f"{get_mention(top_player['user_id'], top_player['username'])} (<code>{top_player['balance']} 💰</code>)"
 
     text = (
@@ -694,7 +700,7 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
         except Exception:
             pass
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
-        await send_game_result(message, "loss", res, user_id=user_id)
+        await send_game_result(message, "loss", user_id=user_id)
 
 
 async def process_ladder_cmd(message: Message, args: List[str]):
@@ -1045,11 +1051,15 @@ async def process_stars_cmd(message: Message, args: List[str]):
 # ================= МАРШРУТИЗАТОР ВСЕХ КОМАНД =================
 @dp.message(F.text)
 async def handle_all_text_commands(message: Message):
-    text = message.text.strip()
-    if not text:
+    full_text = message.text.strip().lower()
+    if not full_text:
         return
 
-    parts = text.split()
+    # 1. ПРИОРИТЕТ: Составные фразы для статистики чата
+    if full_text in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"]:
+        return await process_chat_stats_cmd(message)
+
+    parts = message.text.strip().split()
     cmd_raw = parts[0].lower()
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
@@ -1059,8 +1069,8 @@ async def handle_all_text_commands(message: Message):
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
 
-    # Статистика чата
-    elif cmd in ["chatstats", "статачата", "чатстата", "стата_чата", "чат"]:
+    # Статистика чата (однословные вызовы)
+    elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
     
     # Игры
