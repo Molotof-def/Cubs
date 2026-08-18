@@ -23,7 +23,9 @@ from aiogram.types import (
     ChatMemberOwner,
     ChatMemberAdministrator,
     ChatMemberMember,
-    ChatMemberRestricted
+    ChatMemberRestricted,
+    ChatMemberLeft,
+    ChatMemberBanned
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -41,7 +43,6 @@ if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
 REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
-# Очищаем канал от ссылок https://t.me/
 if "t.me/" in REQUIRED_CHANNEL_RAW:
     REQUIRED_CHANNEL_RAW = "@" + REQUIRED_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQUIRED_CHANNEL_RAW.startswith("-100"):
@@ -173,31 +174,33 @@ def format_duration(seconds: int) -> str:
     return f"{seconds} сек."
 
 
-# ================= НАДЕЖНАЯ ПРОВЕРКА ПОДПИСКИ =================
+# ================= СТРОГАЯ ПРОВЕРКА ПОДПИСКИ =================
 async def check_subscription(user_id: int) -> bool:
     if not REQUIRED_CHANNEL or REQUIRED_CHANNEL.lower() in ["none", "null", "", "@none", "@null"]:
         return True
 
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
-        # Проверяем как через типы классов aiogram, так и через строковые статусы
+        
+        # Если явно вышел или забанен
+        if isinstance(member, (ChatMemberLeft, ChatMemberBanned)):
+            return False
+
+        # Активные участники
         if isinstance(member, (ChatMemberOwner, ChatMemberAdministrator, ChatMemberMember)):
             return True
+
         if isinstance(member, ChatMemberRestricted):
             return getattr(member, "is_member", False)
         
-        # Запасная проверка через статус
         st = str(getattr(member, "status", "")).lower()
-        if any(valid in st for valid in ["creator", "administrator", "member", "owner"]):
+        if any(s in st for s in ["member", "administrator", "creator"]):
             return True
 
         return False
     except Exception as e:
-        err_msg = str(e).lower()
-        logging.error(f"⚠️ Ошибка проверки подписки пользователя {user_id} в {REQUIRED_CHANNEL}: {e}")
-        # Если чат не найден или бот не может получить доступ к участникам, пропускаем во избежание блокировки игроков
-        if "chat not found" in err_msg or "bot is not a member" in err_msg or "member list is inaccessible" in err_msg:
-            return True
+        logging.error(f"❌ Ошибка Telegram get_chat_member({REQUIRED_CHANNEL}, {user_id}): {e}")
+        # Возвращаем False, чтобы требовать подписку
         return False
 
 
@@ -411,7 +414,6 @@ class ThrottlingMiddleware(BaseMiddleware):
             now = time.time()
             last = user_last_action.get(user_id, 0.0)
 
-            # Ограничение частоты кликов
             if now - last < 1.0:
                 if isinstance(event, CallbackQuery):
                     await event.answer("⏳ Не так быстро! Подождите секунду.", show_alert=False)
@@ -1149,7 +1151,7 @@ async def process_gram_cmd(message: Message, args: List[str]):
 
     builder = InlineKeyboardBuilder()
     builder.button(text=f"💎 Оплатить {gram_amount} GRAM", url=ton_link)
-    builder.button(text="✅ Я оплатил", callback_data=f"g_check_{invoice_id}_{user_id}")
+    builder.button(text="✅ Я оплатил", callback_data=f"gcheck:{invoice_id}:{user_id}")
     builder.adjust(1)
 
     text = (
@@ -1562,440 +1564,6 @@ async def handle_all_text_commands(message: Message):
 
         await db.reset_warns(target_id)
         await message.answer(f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.", parse_mode="HTML")
-
-
-# ================= CALLBACKS =================
-@dp.callback_query(F.data.startswith("rep_"))
-async def cb_quick_replay(call: CallbackQuery):
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        return await call.answer("❌ Ошибка параметров!", show_alert=True)
-    
-    game_type = parts[1]
-    try:
-        bet = int(parts[2])
-        allowed_user_id = int(parts[3])
-    except ValueError:
-        return await call.answer("❌ Ошибка данных!", show_alert=True)
-
-    if call.from_user.id != allowed_user_id:
-        return await call.answer("❌ Это не ваша кнопка реванша!", show_alert=True)
-
-    user_id = call.from_user.id
-    user_name = call.from_user.full_name
-    username = call.from_user.username
-
-    await db.register_user(user_id, user_name, username)
-    user = await db.get_user(user_id)
-    user_bal = user[2] if user else 0
-
-    if user_bal < 100:
-        return await call.answer(f"❌ Недостаточно средств для игры! Баланс: {fmt_num(user_bal)} 💰", show_alert=True)
-
-    actual_bet = min(bet, user_bal)
-    await call.answer()
-
-    if game_type == "dice":
-        await run_dice_game(call.message, user_id, user_name, actual_bet)
-    elif game_type == "doubledice":
-        await run_doubledice_game(call.message, user_id, user_name, actual_bet)
-    elif game_type in ["over", "under", "even", "odd"]:
-        await run_simple_bet_game(call.message, user_id, user_name, actual_bet, game_type)
-
-
-@dp.callback_query(F.data.startswith("ac_"))
-async def cb_accept_duel(call: CallbackQuery):
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы принять вызов!", show_alert=True)
-
-    duel_id = call.data.replace("ac_", "")
-    if duel_id not in active_duels:
-        return await call.answer("❌ Дуэль не найдена или уже завершилась!", show_alert=True)
-
-    duel = active_duels[duel_id]
-    if call.from_user.id != duel["opponent_id"]:
-        return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
-
-    if duel["status"] != "pending":
-        return await call.answer("Дуэль уже началась!", show_alert=True)
-
-    duel["status"] = "in_progress"
-    c_id, o_id, bet = duel["challenger_id"], duel["opponent_id"], duel["bet"]
-
-    c_data = await db.get_user(c_id)
-    o_data = await db.get_user(o_id)
-
-    if not c_data or not o_data or c_data[2] < bet or o_data[2] < bet:
-        del active_duels[duel_id]
-        await call.message.edit_text("❌ Дуэль отменена: недостаточно средств!", parse_mode="HTML")
-        return
-
-    await db.change_balance(c_id, -bet)
-    await db.change_balance(o_id, -bet)
-    await db.add_turnover(c_id, bet)
-    await db.add_turnover(o_id, bet)
-
-    await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{fmt_num(bet)} 💰</b>", parse_mode="HTML")
-
-    await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
-    c_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    c_val = int(c_dice.dice.value)
-
-    await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
-    o_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    o_val = int(o_dice.dice.value)
-
-    win_sum = int(bet * 1.95)
-
-    if c_val > o_val:
-        await db.change_balance(c_id, win_sum)
-        await db.record_game(c_id, "win")
-        await db.record_game(o_id, "loss")
-        await db.process_referral_loss(o_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=c_id)
-    elif o_val > c_val:
-        await db.change_balance(o_id, win_sum)
-        await db.record_game(o_id, "win")
-        await db.record_game(c_id, "loss")
-        await db.process_referral_loss(c_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=o_id)
-    else:
-        await db.change_balance(c_id, bet)
-        await db.change_balance(o_id, bet)
-        await db.record_game(c_id, "draw")
-        await db.record_game(o_id, "draw")
-        res = f"🎲 Счёт: <b>{c_val} = {o_val}</b>\n💰 Ставки возвращены (+{fmt_num(bet)} 💰 каждому)."
-        await send_game_result(call.message, "draw", res)
-
-    del active_duels[duel_id]
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("dc_"))
-async def cb_decline_duel(call: CallbackQuery):
-    duel_id = call.data.replace("dc_", "")
-    if duel_id not in active_duels:
-        return await call.answer("❌ Дуэль уже неактивна!", show_alert=True)
-
-    duel = active_duels[duel_id]
-    if call.from_user.id not in [duel["opponent_id"], duel["challenger_id"]]:
-        return await call.answer("❌ Вы не участвуете в этой дуэли!", show_alert=True)
-
-    del active_duels[duel_id]
-    await call.message.edit_text("❌ <b>Дуэль была отклонена.</b>", parse_mode="HTML")
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("ld_step_"))
-async def cb_ladder_step(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_step_", ""))
-    except ValueError:
-        return
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена!", show_alert=True)
-
-    game = active_ladders[user_id]
-    if game.get("is_rolling"):
-        return await call.answer("⏳ Кубик уже брошен, подождите!", show_alert=False)
-
-    game["is_rolling"] = True
-    await call.message.edit_reply_markup(reply_markup=None)
-
-    await call.message.answer(f"🎲 Бросок кубика для подъема {get_mention(user_id, call.from_user.full_name)}:", parse_mode="HTML")
-    dice_msg = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    val = int(dice_msg.dice.value)
-
-    if val in [1, 2]:
-        bet = game["bet"]
-        del active_ladders[user_id]
-        try:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
-        except Exception:
-            pass
-
-        res = (
-            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-            f"🎲 Выпало число: [ <b>{val}</b> ] (Осечка 1-2)\n"
-            f"📉 Ставка сгорела: <b>-{fmt_num(bet)} 💰</b>"
-        )
-        return await send_game_result(call.message, "loss", res, user_id=user_id)
-
-    game["step"] += 1
-    game["is_rolling"] = False
-    step = game["step"]
-    mult = LADDER_STEPS[step]
-
-    if step >= 5:
-        win = int(game["bet"] * mult)
-        del active_ladders[user_id]
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-
-        res = (
-            f"👑 <b>ВЕРШИНА ПОКОРЕНА! ВЫ ПРОШЛИ ВСЮ ЛЕСЕНКУ!</b>\n\n"
-            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-            f"🎲 Выпало: [ <b>{val}</b> ]\n"
-            f"{render_ladder(5)}\n\n"
-            f"🔥 Максимальный множитель: <b>x{mult}</b>\n"
-            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        )
-        return await send_game_result(call.message, "win", res, user_id=user_id)
-
-    current_win = int(game["bet"] * mult)
-    res = (
-        f"🧗 <b>УСПЕШНЫЙ ШАГ ВВЕРХ!</b>\n\n"
-        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-        f"🎲 Выпало: [ <b>{val}</b> ]\n\n"
-        f"{render_ladder(step)}\n\n"
-        f"📈 Множитель: <b>x{mult}</b> (Куш: <b>{fmt_num(current_win)} 💰</b>)"
-    )
-    await call.message.answer(res, reply_markup=ladder_keyboard(user_id, step), parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("ld_cash_"))
-async def cb_ladder_cash(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_cash_", ""))
-    except ValueError:
-        return
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена!", show_alert=True)
-
-    game = active_ladders[user_id]
-    mult = LADDER_STEPS[game["step"]]
-    win = int(game["bet"] * mult)
-
-    del active_ladders[user_id]
-    await db.change_balance(user_id, win)
-    await db.record_game(user_id, "win")
-
-    await call.message.edit_reply_markup(reply_markup=None)
-
-    res = (
-        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-        f"🧗 Остановлено на: <b>Ступень {game['step']}</b>\n"
-        f"📈 Зафиксирован множитель: <b>x{mult}</b>\n"
-        f"💵 На баланс зачислено: <b>+{fmt_num(win)} 💰</b>"
-    )
-    await send_game_result(call.message, "win", res, user_id=user_id)
-
-
-# ================= ЗАЩИЩЕННЫЙ CALLBACK «Я ОПЛАТИЛ» =================
-@dp.callback_query(F.data.startswith("g_check_"))
-async def cb_gram_check(call: CallbackQuery):
-    raw_data = call.data.replace("g_check_", "")
-    parts = raw_data.split("_")
-    
-    if len(parts) < 2:
-        return await call.answer("❌ Ошибка формата заявки!", show_alert=True)
-    
-    inv_id = f"G_{parts[0]}" if not parts[0].startswith("G_") else parts[0]
-    expected_user_id = int(parts[1]) if parts[1].isdigit() else 0
-
-    if call.from_user.id != expected_user_id:
-        return await call.answer("❌ Это не ваша заявка на оплату!", show_alert=True)
-
-    async with db.pool.acquire() as conn:
-        dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
-        if not dep:
-            return await call.answer("❌ Заявка не найдена в базе!", show_alert=True)
-
-        if dep["user_id"] != call.from_user.id:
-            return await call.answer("❌ Вы не являетесь владельцем этой заявки!", show_alert=True)
-
-        if dep["status"] == "completed":
-            return await call.answer("✅ Этот платеж уже зачислен на ваш баланс!", show_alert=True)
-        
-        if dep["status"] == "under_review":
-            return await call.answer("⏳ Платеж уже находится на проверке администрацией.", show_alert=True)
-
-        await conn.execute("UPDATE gram_deposits SET status = 'under_review' WHERE invoice_id = $1", inv_id)
-
-    await call.answer("⏳ Запрос на проверку отправлен администраторам!", show_alert=True)
-    await call.message.edit_text("⏳ <b>Платеж отправлен на проверку!</b> Монеты будут зачислены после подтверждения.", parse_mode="HTML")
-
-    if OWNER_ID:
-        admin_text = (
-            f"💎 <b>НОВОЕ ПОПОЛНЕНИЕ GRAM/TON!</b>\n\n"
-            f"👤 Игрок: {get_mention(dep['user_id'], call.from_user.full_name)} (ID: <code>{dep['user_id']}</code>)\n"
-            f"💵 Сумма: <b>{dep['gram_amount']} GRAM</b>\n"
-            f"💰 К начислению: <b>{fmt_num(dep['coins_amount'])} 💰</b>\n"
-            f"📝 Memo/Инвойс: <code>{inv_id}</code>"
-        )
-        try:
-            await bot.send_message(
-                chat_id=OWNER_ID,
-                text=admin_text,
-                reply_markup=gram_admin_keyboard(inv_id),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.error(f"Ошибка отправки уведомления админу: {e}")
-
-
-@dp.callback_query(F.data.startswith("g_ok_"))
-async def cb_gram_approve(call: CallbackQuery):
-    if not await db.is_admin(call.from_user.id):
-        return await call.answer("❌ Нет прав!", show_alert=True)
-
-    inv_id = call.data.replace("g_ok_", "")
-    async with db.pool.acquire() as conn:
-        dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
-        if not dep or dep["status"] == "completed":
-            return await call.answer("❌ Заявка уже обработана!", show_alert=True)
-
-        await conn.execute("UPDATE gram_deposits SET status = 'completed' WHERE invoice_id = $1", inv_id)
-        await db.change_balance(dep["user_id"], int(dep["coins_amount"]))
-        await conn.execute("UPDATE users SET has_deposited = TRUE WHERE user_id = $1", dep["user_id"])
-
-    try:
-        await bot.send_message(
-            chat_id=dep["user_id"],
-            text=f"🎉 <b>Платеж GRAM подтвержден!</b>\n💰 Начислено: <b>+{fmt_num(dep['coins_amount'])} 💰</b> (без холда)",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    await call.message.edit_text(f"{call.message.text}\n\n<b>✅ ЗАЧИСЛЕНО админом {get_mention(call.from_user.id, call.from_user.full_name)}</b>", parse_mode="HTML")
-    await call.answer("✅ Монеты зачислены!")
-
-
-@dp.callback_query(F.data.startswith("g_no_"))
-async def cb_gram_reject(call: CallbackQuery):
-    if not await db.is_admin(call.from_user.id):
-        return await call.answer("❌ Нет прав!", show_alert=True)
-
-    inv_id = call.data.replace("g_no_", "")
-    async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE gram_deposits SET status = 'rejected' WHERE invoice_id = $1", inv_id)
-
-    await call.message.edit_text(f"{call.message.text}\n\n<b>❌ ОТКЛОНЕНО</b>", parse_mode="HTML")
-    await call.answer("❌ Заявка отклонена.")
-
-
-@dp.callback_query(F.data.startswith("wd_ok_"))
-async def cb_withdraw_approve(call: CallbackQuery):
-    if not await db.is_admin(call.from_user.id):
-        return await call.answer("❌ Нет прав!", show_alert=True)
-
-    req_id = call.data.replace("wd_ok_", "")
-    
-    async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, stars_amount, target_username, status FROM withdraw_requests WHERE req_id = $1", req_id)
-        if not req or req["status"] != "pending":
-            return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
-
-        await conn.execute("UPDATE withdraw_requests SET status = 'approved' WHERE req_id = $1", req_id)
-
-    stars = req["stars_amount"] if req["stars_amount"] else req["amount"] // 10
-
-    try:
-        await bot.send_message(
-            chat_id=req["user_id"],
-            text=(
-                f"✅ <b>Заявка #{req_id} выплачена!</b>\n\n"
-                f"⭐ Вам отправлено: <b>+{fmt_num(stars)} Telegram Stars</b>\n"
-                f"👤 На аккаунт: <code>{html.escape(req['target_username'])}</code>\n\n"
-                f"<i>Спасибо за игру в Duel cubes!</i>"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    await call.message.edit_text(
-        f"{call.message.text}\n\n<b>✅ СТАТУС: Звёзды отправлены админом {get_mention(call.from_user.id, call.from_user.full_name)}</b>",
-        parse_mode="HTML"
-    )
-    await call.answer("✅ Выплата Stars подтверждена!")
-
-
-@dp.callback_query(F.data.startswith("wd_no_"))
-async def cb_withdraw_reject(call: CallbackQuery):
-    if not await db.is_admin(call.from_user.id):
-        return await call.answer("❌ Нет прав!", show_alert=True)
-
-    req_id = call.data.replace("wd_no_", "")
-
-    async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
-        if not req or req["status"] != "pending":
-            return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
-
-        await conn.execute("UPDATE withdraw_requests SET status = 'rejected' WHERE req_id = $1", req_id)
-        await db.change_balance(req["user_id"], req["amount"])
-
-    try:
-        await bot.send_message(
-            chat_id=req["user_id"],
-            text=(
-                f"❌ <b>Заявка на вывод #{req_id} отклонена!</b>\n\n"
-                f"💰 Сумма <b>{fmt_num(req['amount'])} 💰</b> возвращена на ваш игровой баланс.\n"
-                f"<i>Убедитесь в правильности указанного @username и повторите попытку.</i>"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    await call.message.edit_text(
-        f"{call.message.text}\n\n<b>❌ СТАТУС: Отклонено (монеты возвращены игроку)</b>",
-        parse_mode="HTML"
-    )
-    await call.answer("❌ Заявка отклонена, средства возвращены.")
-
-
-@dp.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-
-@dp.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    payload = message.successful_payment.invoice_payload
-    if payload.startswith("stars_deposit_"):
-        coins = int(payload.replace("stars_deposit_", ""))
-        await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-        await db.change_balance(message.from_user.id, coins)
-        
-        async with db.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET has_deposited = TRUE, last_stars_deposit = CURRENT_TIMESTAMP WHERE user_id = $1",
-                message.from_user.id
-            )
-
-        await message.answer(
-            f"🎉 <b>Оплата успешна!</b>\n"
-            f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
-            f"💰 Зачислено: <b>+{fmt_num(coins)} монет</b>\n"
-            f"🔒 <i>Вывод доступен через 21 день (защита Telegram Stars Refund). Пополнения через <code>грам</code> выводятся без ожидания.</i>",
-            parse_mode="HTML"
-        )
 
 
 # ================= ЗАПУСК =================
