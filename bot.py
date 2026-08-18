@@ -41,7 +41,6 @@ WEBHOOK_PATH = "/webhook"
 
 GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
 
-# ВСТАВЬТЕ СЮДА ВАШИ ССЫЛКИ RAW С GITHUB
 IMG_WIN = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.png"
 IMG_LOSS = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.png"
 IMG_DRAW = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/great-ball.png"
@@ -207,19 +206,14 @@ class Database:
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
                 );
-            """)
-            await conn.execute("""
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT DEFAULT NULL;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username TEXT DEFAULT NULL;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS has_deposited BOOLEAN DEFAULT FALSE;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS last_stars_deposit TIMESTAMP DEFAULT NULL;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-                ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS stars_amount INT DEFAULT 0;
-                ALTER TABLE withdraw_requests ADD COLUMN IF NOT EXISTS target_username TEXT DEFAULT '';
+                CREATE TABLE IF NOT EXISTS chat_members (
+                    chat_id BIGINT,
+                    user_id BIGINT,
+                    PRIMARY KEY (chat_id, user_id)
+                );
             """)
 
-    async def register_user(self, user_id: int, username: str, tg_username: Optional[str] = None, referrer_id: Optional[int] = None):
+    async def register_user(self, user_id: int, username: str, tg_username: Optional[str] = None, referrer_id: Optional[int] = None, chat_id: Optional[int] = None):
         clean_tag = tg_username.replace("@", "").lower() if tg_username else None
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -229,6 +223,13 @@ class Database:
                     username = EXCLUDED.username,
                     tg_username = COALESCE(EXCLUDED.tg_username, users.tg_username)
             """, user_id, username, clean_tag, referrer_id)
+
+            if chat_id:
+                await conn.execute("""
+                    INSERT INTO chat_members (chat_id, user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                """, chat_id, user_id)
 
     async def get_user_id_by_username(self, tg_username: str):
         clean_tag = tg_username.replace("@", "").lower().strip()
@@ -284,6 +285,31 @@ class Database:
         async with self.pool.acquire() as conn:
             return await conn.fetch("SELECT username, balance FROM users ORDER BY balance DESC LIMIT $1", limit)
 
+    async def get_chat_stats(self, chat_id: int):
+        async with self.pool.acquire() as conn:
+            stats = await conn.fetchrow("""
+                SELECT 
+                    COUNT(u.user_id) as total_players,
+                    COALESCE(SUM(u.balance), 0) as total_balance,
+                    COALESCE(SUM(u.turnover), 0) as total_turnover,
+                    COALESCE(SUM(u.wins), 0) as total_wins,
+                    COALESCE(SUM(u.losses), 0) as total_losses
+                FROM chat_members cm
+                JOIN users u ON cm.user_id = u.user_id
+                WHERE cm.chat_id = $1
+            """, chat_id)
+            
+            top_player = await conn.fetchrow("""
+                SELECT u.user_id, u.username, u.balance
+                FROM chat_members cm
+                JOIN users u ON cm.user_id = u.user_id
+                WHERE cm.chat_id = $1
+                ORDER BY u.balance DESC
+                LIMIT 1
+            """, chat_id)
+            
+            return stats, top_player
+
     async def is_admin(self, user_id: int) -> bool:
         if user_id == OWNER_ID:
             return True
@@ -312,18 +338,23 @@ db = Database(DATABASE_URL)
 @dp.message.outer_middleware()
 async def auto_register_middleware(handler, event: Message, data: dict):
     if event.from_user and not event.from_user.is_bot:
-        if event.chat and event.chat.type in ["group", "supergroup"]:
-            c_id = event.chat.id
-            if c_id not in chat_recent_users:
-                chat_recent_users[c_id] = []
-            if event.from_user.id not in chat_recent_users[c_id]:
-                chat_recent_users[c_id].append(event.from_user.id)
-                if len(chat_recent_users[c_id]) > 50:
-                    chat_recent_users[c_id].pop(0)
+        chat_id = event.chat.id if event.chat and event.chat.type in ["group", "supergroup"] else None
+        if chat_id:
+            if chat_id not in chat_recent_users:
+                chat_recent_users[chat_id] = []
+            if event.from_user.id not in chat_recent_users[chat_id]:
+                chat_recent_users[chat_id].append(event.from_user.id)
+                if len(chat_recent_users[chat_id]) > 50:
+                    chat_recent_users[chat_id].pop(0)
 
         if db.pool:
             try:
-                await db.register_user(event.from_user.id, event.from_user.full_name, event.from_user.username)
+                await db.register_user(
+                    event.from_user.id, 
+                    event.from_user.full_name, 
+                    event.from_user.username,
+                    chat_id=chat_id
+                )
             except Exception:
                 pass
     return await handler(event, data)
@@ -380,7 +411,22 @@ def ladder_keyboard(user_id: int, step: int):
     return builder.as_markup()
 
 
-# ================= ОБРАБОТЧИКИ ИГР И ФУНКЦИЙ =================
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СТАВОК =================
+def resolve_bet_amount(arg_val: Optional[str], current_balance: int) -> Optional[int]:
+    """Разбирает ставку: число, 'вабанк', 'все', 'всё', 'all', 'full', 'макс'"""
+    if not arg_val:
+        return 100
+    
+    val_lower = arg_val.lower().strip()
+    if val_lower in ["вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", "макс", "max"]:
+        return current_balance
+
+    if val_lower.isdigit():
+        return int(val_lower)
+        
+    return None
+
+
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -396,22 +442,52 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"🎲 <b>Добро пожаловать в Duel cubes!</b>\n\n"
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{balance} монет</b>\n\n"
-        f"📜 <b>Режимы игр (мин. ставка 100 💰):</b>\n"
-        f"⚔️ <code>дуэль [ставка]</code> — дуэль 1 на 1 в чате (ответом)\n"
-        f"🎲 <code>кубик [ставка]</code> — бросок против бота\n"
-        f"🎲🎲 <code>дабл [ставка]</code> — 2 кубика (х3 за дубль)\n"
-        f"🚀 <code>лесенка [ставка]</code> — Кубическая Лесенка (до x7.5)\n"
-        f"📈 <code>больше [ставка]</code> — Больше (4, 5, 6)\n"
-        f"📉 <code>меньше [ставка]</code> — Меньше (1, 2, 3)\n"
-        f"⚖️ <code>четное [ставка]</code> — Чётное число\n"
-        f"🎲 <code>нечетное [ставка]</code> — Нечётное число\n\n"
+        f"📜 <b>Режимы игр (мин. ставка 100 💰 или «вабанк»):</b>\n"
+        f"⚔️ <code>дуэль [ставка/вабанк]</code> — дуэль 1 на 1 в чате (ответом)\n"
+        f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
+        f"🎲🎲 <code>дабл [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
+        f"🚀 <code>лесенка [ставка/вабанк]</code> — Кубическая Лесенка (до x7.5)\n"
+        f"📈 <code>больше [ставка/вабанк]</code> — Больше (4, 5, 6)\n"
+        f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
+        f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
+        f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n\n"
         f"💳 <b>Пополнение и Вывод:</b>\n"
         f"💎 <code>грам [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
         f"⭐ <code>звезды [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>вывод [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🤝 <code>реф</code> — реферальная ссылка (3%)\n"
-        f"💸 <code>перевод [сумма]</code> (ответом) — передать монеты\n"
-        f"👤 <code>профиль</code> | 🏆 <code>топ</code>"
+        f"💸 <code>перевод [сумма]</code> (ответом) — передать монеты"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+async def process_chat_stats_cmd(message: Message):
+    if message.chat.type not in ["group", "supergroup"]:
+        return await message.answer("❌ Статистика чата доступна только в группах!")
+
+    stats, top_player = await db.get_chat_stats(message.chat.id)
+    if not stats or stats["total_players"] == 0:
+        return await message.answer("📊 В этом чате пока нет зарегистрированных игроков.")
+
+    total_games = stats["total_wins"] + stats["total_losses"]
+    winrate = round((stats["total_wins"] / total_games * 100), 1) if total_games > 0 else 0
+
+    top_text = "Нет"
+    if top_player:
+        top_text = f"{get_mention(top_player['user_id'], top_player['username'])} (<code>{top_player['balance']} 💰</code>)"
+
+    text = (
+        f"📊 <b>ИГРОВАЯ СТАТИСТИКА ЧАТА</b>\n"
+        f"👥 Чат: <b>{html.escape(message.chat.title or 'Группа')}</b>\n\n"
+        f"👤 Всего активных игроков: <b>{stats['total_players']}</b>\n"
+        f"💰 Общий капитал игроков: <b>{stats['total_balance']} 💰</b>\n"
+        f"🔄 Суммарный оборот: <b>{stats['total_turnover']} 💰</b>\n"
+        f"🎮 Всего сыграно игр: <b>{total_games}</b>\n"
+        f"🏆 Побед: <b>{stats['total_wins']}</b> | 💀 Поражений: <b>{stats['total_losses']}</b>\n"
+        f"📈 Общий винрейт чата: <b>{winrate}%</b>\n\n"
+        f"👑 <b>Богач чата:</b> {top_text}"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -423,20 +499,24 @@ async def process_dice_cmd(message: Message, args: List[str]):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 100
-    if args and args[0].isdigit():
-        bet = int(args[0])
-    if bet < 100:
-        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
-
     user = await db.get_user(user_id)
-    if not user or user[2] < bet:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+    user_bal = user[2] if user else 0
+
+    bet = resolve_bet_amount(args[0] if args else None, user_bal)
+    if bet is None:
+        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.")
+
+    if bet < 100:
+        return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! У вас: <code>{user_bal} 💰</code>")
+
+    if user_bal < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user_bal} 💰</b>", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
 
-    await message.answer(f"🎲 Бросок {get_mention(user_id, message.from_user.full_name)}:", parse_mode="HTML")
+    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
+    await message.answer(f"{is_allin}🎲 Бросок {get_mention(user_id, message.from_user.full_name)} (Ставка: <b>{bet} 💰</b>):", parse_mode="HTML")
     p_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
     p_val = int(p_msg.dice.value)
@@ -492,20 +572,24 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 100
-    if args and args[0].isdigit():
-        bet = int(args[0])
-    if bet < 100:
-        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
-
     user = await db.get_user(user_id)
-    if not user or user[2] < bet:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+    user_bal = user[2] if user else 0
+
+    bet = resolve_bet_amount(args[0] if args else None, user_bal)
+    if bet is None:
+        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.")
+
+    if bet < 100:
+        return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! У вас: <code>{user_bal} 💰</code>")
+
+    if user_bal < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user_bal} 💰</b>", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
 
-    await message.answer(f"🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)}:</b>", parse_mode="HTML")
+    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
+    await message.answer(f"{is_allin}🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, message.from_user.full_name)} (Ставка: {bet} 💰):</b>", parse_mode="HTML")
     p_d1 = await message.answer_dice(emoji="🎲")
     p_d2 = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
@@ -548,7 +632,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
         except Exception:
             pass
         res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{bet} 💰</b> возвращена!"
-        await send_game_result(message, "draw", res, user_id=user_id)
+        await send_game_result(message, "draw", user_id=user_id)
 
 
 async def process_simple_bet(message: Message, args: List[str], game_type: str):
@@ -558,15 +642,18 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
     if not await check_subscription(user_id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    bet = 100
-    if args and args[0].isdigit():
-        bet = int(args[0])
-    if bet < 100:
-        return await message.answer("❌ Минимальная ставка: <b>100 💰</b>!")
-
     user = await db.get_user(user_id)
-    if not user or user[2] < bet:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+    user_bal = user[2] if user else 0
+
+    bet = resolve_bet_amount(args[0] if args else None, user_bal)
+    if bet is None:
+        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.")
+
+    if bet < 100:
+        return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! У вас: <code>{user_bal} 💰</code>")
+
+    if user_bal < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user_bal} 💰</b>", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -578,7 +665,8 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
         "odd": "НЕЧЁТНОЕ (1, 3, 5)"
     }
 
-    await message.answer(f"🎲 {get_mention(user_id, message.from_user.full_name)} поставил на <b>{type_titles[game_type]}</b>:", parse_mode="HTML")
+    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
+    await message.answer(f"{is_allin}🎲 {get_mention(user_id, message.from_user.full_name)} поставил <b>{bet} 💰</b> на <b>{type_titles[game_type]}</b>:", parse_mode="HTML")
     dice_msg = await message.answer_dice(emoji="🎲")
     await asyncio.sleep(4.0)
     val = int(dice_msg.dice.value)
@@ -619,15 +707,18 @@ async def process_ladder_cmd(message: Message, args: List[str]):
     if user_id in active_ladders:
         return await message.answer("❌ У вас уже начата игра в Лесенку! Завершите её.")
 
-    bet = 100
-    if args and args[0].isdigit():
-        bet = int(args[0])
-    if bet < 100:
-        return await message.answer("❌ Минимальная ставка в Лесенке: <b>100 💰</b>!")
-
     user = await db.get_user(user_id)
-    if not user or user[2] < bet:
-        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user[2] if user else 0} 💰</b>", parse_mode="HTML")
+    user_bal = user[2] if user else 0
+
+    bet = resolve_bet_amount(args[0] if args else None, user_bal)
+    if bet is None:
+        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.")
+
+    if bet < 100:
+        return await message.answer(f"❌ Минимальная ставка в Лесенке: <b>100 💰</b>! У вас: <code>{user_bal} 💰</code>")
+
+    if user_bal < bet:
+        return await message.answer(f"❌ Недостаточно средств! Баланс: <b>{user_bal} 💰</b>", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -639,8 +730,10 @@ async def process_ladder_cmd(message: Message, args: List[str]):
         "is_rolling": False
     }
 
+    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
     text = (
         f"🚀 <b>КУБИЧЕСКАЯ ЛЕСЕНКА</b>\n\n"
+        f"{is_allin}"
         f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)}\n"
         f"💰 Ставка: <b>{bet} 💰</b>\n\n"
         f"{render_ladder(0)}\n\n"
@@ -664,21 +757,23 @@ async def process_duel_cmd(message: Message, args: List[str]):
     if opponent.id == challenger.id:
         return await message.answer("❌ Нельзя играть с самим собой!")
 
-    bet = 100
-    if args and args[0].isdigit():
-        bet = int(args[0])
+    c_data = await db.get_user(challenger.id)
+    c_bal = c_data[2] if c_data else 0
+
+    bet = resolve_bet_amount(args[0] if args else None, c_bal)
+    if bet is None:
+        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.")
+
     if bet < 100:
-        return await message.answer("❌ Минимальная ставка для дуэли: <b>100 💰</b>!")
+        return await message.answer(f"❌ Минимальная ставка для дуэли: <b>100 💰</b>! У вас: <code>{c_bal} 💰</code>")
 
     await db.register_user(opponent.id, opponent.full_name, opponent.username)
-
-    c_data = await db.get_user(challenger.id)
     o_data = await db.get_user(opponent.id)
 
-    if not c_data or c_data[2] < bet:
-        return await message.answer("❌ У вас недостаточно монет!")
+    if not c_data or c_bal < bet:
+        return await message.answer(f"❌ У вас недостаточно монет! Баланс: <code>{c_bal} 💰</code>")
     if not o_data or o_data[2] < bet:
-        return await message.answer("❌ У оппонента недостаточно монет!")
+        return await message.answer(f"❌ У оппонента недостаточно монет для этой ставки! Баланс оппонента: <code>{o_data[2] if o_data else 0} 💰</code>")
 
     duel_id = uuid.uuid4().hex[:8]
 
@@ -692,8 +787,10 @@ async def process_duel_cmd(message: Message, args: List[str]):
         "status": "pending"
     }
 
+    is_allin = "🔥 <b>ALL-IN ВЫЗОВ (ВА-БАНК)!</b>\n" if bet == c_bal else ""
     text = (
         f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
+        f"{is_allin}"
         f"🔴 Вызывающий: {get_mention(challenger.id, challenger.full_name)}\n"
         f"🔵 Оппонент: {get_mention(opponent.id, opponent.full_name)}\n"
         f"💰 Ставка: <b>{bet} 💰</b> (Приз: <b>+{int(bet * 1.95)} 💰</b>)\n\n"
@@ -764,19 +861,18 @@ async def process_pay_cmd(message: Message, args: List[str]):
     if recipient.id == sender.id:
         return await message.answer("❌ Нельзя переводить монеты самому себе!")
 
-    if not args or not args[0].isdigit():
-        return await message.answer("❌ Формат: <code>перевод 100</code>", parse_mode="HTML")
+    sender_data = await db.get_user(sender.id)
+    sender_bal = sender_data[2] if sender_data else 0
 
-    amount = int(args[0])
-    if amount <= 0:
-        return await message.answer("❌ Сумма перевода должна быть больше 0!")
+    amount = resolve_bet_amount(args[0] if args else None, sender_bal)
+    if amount is None or amount <= 0:
+        return await message.answer("❌ Укажите корректную сумму: <code>перевод 100</code> или <code>перевод вабанк</code>", parse_mode="HTML")
+
+    if sender_bal < amount:
+        return await message.answer(f"❌ Недостаточно монет для перевода! Ваш баланс: <code>{sender_bal} 💰</code>")
 
     await db.register_user(sender.id, sender.full_name, sender.username)
     await db.register_user(recipient.id, recipient.full_name, recipient.username)
-
-    sender_data = await db.get_user(sender.id)
-    if not sender_data or sender_data[2] < amount:
-        return await message.answer("❌ Недостаточно монет для перевода!")
 
     await db.change_balance(sender.id, -amount)
     await db.change_balance(recipient.id, amount)
@@ -845,15 +941,18 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
             "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
             "🔒 <b>Защита от Refund:</b> Вывод доступен спустя <b>21 день</b> после последнего пополнения через Stars (на пополнения через <code>грам</code> холд не действует).\n\n"
-            "Формат: <code>вывод [монеты] [твой_тег]</code>\n"
+            "Формат: <code>вывод [монеты/вабанк] [твой_тег]</code>\n"
             "<i>Пример:</i> <code>вывод 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
         )
 
-    if not args[0].isdigit():
-        return await message.answer("❌ Сумма должна быть числом!")
+    user = await db.get_user(user_id)
+    user_bal = user[2] if user else 0
 
-    amount = int(args[0])
+    amount = resolve_bet_amount(args[0], user_bal)
+    if amount is None:
+        return await message.answer("❌ Неверный формат суммы! Укажите число или <code>вабанк</code>.")
+
     target_username = args[1].strip() if len(args) > 1 else (f"@{message.from_user.username}" if message.from_user.username else str(user_id))
 
     if amount < 1000:
@@ -862,11 +961,9 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             parse_mode="HTML"
         )
 
-    user = await db.get_user(user_id)
-    if not user or user[2] < amount:
-        bal = user[2] if user else 0
+    if user_bal < amount:
         return await message.answer(
-            f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{bal} 💰</code>",
+            f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{user_bal} 💰</code>",
             parse_mode="HTML"
         )
 
@@ -923,7 +1020,7 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
                 parse_mode="HTML"
             )
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление админу: {e}")
+            logging.error(f"Не удалось отправить уведомление админу о выводе: {e}")
 
 
 async def process_stars_cmd(message: Message, args: List[str]):
@@ -958,32 +1055,36 @@ async def handle_all_text_commands(message: Message):
     args = parts[1:]
 
     # Старт
-    if cmd in ["start", "старт", "меню", "menu"]:
+    if cmd in ["start", "старт", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
+
+    # Статистика чата
+    elif cmd in ["chatstats", "статачата", "чатстата", "стата_чата", "чат"]:
+        await process_chat_stats_cmd(message)
     
     # Игры
-    elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
+    elif cmd in ["dice", "кубик", "кость", "кости", "куб", "бросок", "го", "гоу", "играть", "play"]:
         await process_dice_cmd(message, args)
-    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "двойной"]:
+    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "двойной", "пара", "два", "2кубика"]:
         await process_doubledice_cmd(message, args)
-    elif cmd in ["ladder", "лесенка", "лестница"]:
+    elif cmd in ["ladder", "лесенка", "лестница", "ступень", "подъем", "горка"]:
         await process_ladder_cmd(message, args)
-    elif cmd in ["duel", "дуэль", "бой"]:
+    elif cmd in ["duel", "дуэль", "бой", "пвп", "pvp", "вызов", "дуели", "дуель"]:
         await process_duel_cmd(message, args)
-    elif cmd in ["over", "больше", "бол"]:
+    elif cmd in ["over", "больше", "бол", "хай", "high", ">", "верх"]:
         await process_simple_bet(message, args, "over")
-    elif cmd in ["under", "меньше", "мен"]:
+    elif cmd in ["under", "меньше", "мен", "лоу", "low", "<", "низ"]:
         await process_simple_bet(message, args, "under")
-    elif cmd in ["even", "чет", "четное", "чёт", "чётное"]:
+    elif cmd in ["even", "чет", "четное", "чёт", "чётное", "ч"]:
         await process_simple_bet(message, args, "even")
-    elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
+    elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное", "н", "нч"]:
         await process_simple_bet(message, args, "odd")
     
     # Личный кабинет и финансы
-    elif cmd in ["profile", "профиль", "баланс", "stats", "стата"]:
+    elif cmd in ["profile", "профиль", "баланс", "stats", "стата", "я", "монетки", "монеты", "счет", "счёт"]:
         await process_profile_cmd(message)
-    elif cmd in ["ref", "реф", "рефералы", "друзья"]:
+    elif cmd in ["ref", "реф", "рефералы", "друзья", "пригласить", "ссылка", "партнерка"]:
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
         ref_count = await db.get_referrals_count(message.from_user.id)
@@ -994,19 +1095,19 @@ async def handle_all_text_commands(message: Message):
             f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
         )
         await message.answer(text_ref, parse_mode="HTML")
-    elif cmd in ["top", "топ", "лидеры", "богачи"]:
+    elif cmd in ["top", "топ", "лидеры", "богачи", "список", "рейтинг", "таблица"]:
         await process_top_cmd(message)
-    elif cmd in ["pay", "передать", "перевод", "дать"]:
+    elif cmd in ["pay", "передать", "перевод", "дать", "скинуть", "отдать", "поделиться"]:
         await process_pay_cmd(message, args)
-    elif cmd in ["gram", "ton", "тон", "грам", "крипта"]:
+    elif cmd in ["gram", "ton", "тон", "грам", "крипта", "деп", "пополнитьтон", "депозит"]:
         await process_gram_cmd(message, args)
-    elif cmd in ["stars", "звезды", "донат", "donate", "пополнить"]:
+    elif cmd in ["stars", "звезды", "звёзды", "донат", "donate", "пополнить", "купить"]:
         await process_stars_cmd(message, args)
-    elif cmd in ["withdraw", "out", "вывод", "снять"]:
+    elif cmd in ["withdraw", "out", "вывод", "снять", "вывести", "обнал", "кешаут"]:
         await process_withdraw_cmd(message, args)
     
     # Админка
-    elif cmd in ["give", "выдать"]:
+    elif cmd in ["give", "выдать", "начислить", "сет"]:
         if not await db.is_admin(message.from_user.id):
             return
         if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
@@ -1022,7 +1123,7 @@ async def handle_all_text_commands(message: Message):
         await db.change_balance(target.id, amount)
         verb = "выдал" if amount >= 0 else "забрал"
         await message.answer(f"👑 Администратор {verb} <b>{abs(amount)} 💰</b> у {get_mention(target.id, target.full_name)}!", parse_mode="HTML")
-    elif cmd in ["mute", "мут"]:
+    elif cmd in ["mute", "мут", "завалить", "замутить"]:
         if not await db.is_admin(message.from_user.id):
             return
         target = message.reply_to_message.from_user if message.reply_to_message else None
@@ -1042,7 +1143,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🔇 {get_mention(target.id, target.full_name)} отправлен в мут на {mins} мин.\n📝 Причина: {reason}", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
-    elif cmd in ["unmute", "размут"]:
+    elif cmd in ["unmute", "размут", "снятьмут"]:
         if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
             return
         target = message.reply_to_message.from_user
@@ -1065,7 +1166,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🔊 {get_mention(target.id, target.full_name)} размучен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
-    elif cmd in ["ban", "бан"]:
+    elif cmd in ["ban", "бан", "забанить", "кик", "kick"]:
         if not await db.is_admin(message.from_user.id):
             return
         target_id = None
@@ -1091,7 +1192,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"🛑 {get_mention(target_id, target_name)} забанен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка при бане: {e}")
-    elif cmd in ["unban", "разбан"]:
+    elif cmd in ["unban", "разбан", "снятьбан"]:
         if not await db.is_admin(message.from_user.id):
             return
         target_id = None
@@ -1112,7 +1213,7 @@ async def handle_all_text_commands(message: Message):
             await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка разбана: {e}")
-    elif cmd in ["warn", "варн", "пред"]:
+    elif cmd in ["warn", "варн", "пред", "предупреждение"]:
         if not await db.is_admin(message.from_user.id):
             return
         target = message.reply_to_message.from_user if message.reply_to_message else None
@@ -1131,7 +1232,7 @@ async def handle_all_text_commands(message: Message):
                 await message.answer(f"❌ Ошибка при бане: {e}")
         else:
             await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
-    elif cmd in ["unwarn", "снятьварн", "разварн"]:
+    elif cmd in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
         if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
             return
         target = message.reply_to_message.from_user
@@ -1516,6 +1617,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
+        BotCommand(command="chatstats", description="Статистика чата 📊"),
         BotCommand(command="over", description="Больше (4-6) 📈"),
         BotCommand(command="under", description="Меньше (1-3) 📉"),
         BotCommand(command="even", description="Чётное число ⚖️"),
