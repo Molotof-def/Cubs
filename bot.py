@@ -571,7 +571,7 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
     b_val = int(b_msg.dice.value)
 
     if p_val > b_val:
-        win = int(bet * 1.95)
+        win = int(bet * 1.9)
         await db.change_balance(user_id, win)
         try:
             await db.record_game(user_id, "win")
@@ -580,7 +580,7 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         text = (
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
             f"👤 {get_mention(user_id, user_name)}\n"
-            f"💰 Коэффициент: <b>x1.95</b>\n"
+            f"💰 Коэффициент: <b>x1.9</b>\n"
             f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
         )
         await send_game_result(message, "win", text, user_id=user_id, game_type="dice", bet=bet)
@@ -636,7 +636,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
 
     if p_sum > b_sum:
         is_double = (p1 == p2)
-        mult = 3.0 if is_double else 1.95
+        mult = 3.0 if is_double else 1.9
         win = int(bet * mult)
 
         await db.change_balance(user_id, win)
@@ -663,7 +663,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
         except Exception:
             pass
         res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{fmt_num(bet)} 💰</b> возвращена!"
-        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
+        await send_game_result(message, "draw", user_id=user_id, game_type="doubledice", bet=bet)
 
 
 async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
@@ -700,13 +700,13 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
         win_cond = True
 
     if win_cond:
-        win = int(bet * 1.95)
+        win = int(bet * 1.9)
         await db.change_balance(user_id, win)
         try:
             await db.record_game(user_id, "win")
         except Exception:
             pass
-        res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, user_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
+        res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, user_name)}\n💰 Множитель: <b>x1.9</b>\n💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
         await send_game_result(message, "win", res, user_id=user_id, game_type=game_type, bet=bet)
     else:
         try:
@@ -977,7 +977,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
         f"{is_allin}"
         f"🔴 Вызывающий: {get_mention(challenger.id, challenger.full_name)}\n"
         f"🔵 Оппонент: {get_mention(target_id, target_name)}\n"
-        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b> (Приз: <b>+{fmt_num(int(bet * 1.95))} 💰</b>)\n\n"
+        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b> (Приз: <b>+{fmt_num(int(bet * 1.9))} 💰</b>)\n\n"
         f"<i>У оппонента 60 секунд на принятие.</i>"
     )
 
@@ -1656,7 +1656,7 @@ async def cb_accept_duel(call: CallbackQuery):
     await asyncio.sleep(4.0)
     o_val = int(o_dice.dice.value)
 
-    win_sum = int(bet * 1.95)
+    win_sum = int(bet * 1.9)
 
     if c_val > o_val:
         await db.change_balance(c_id, win_sum)
