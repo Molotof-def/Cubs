@@ -5,19 +5,21 @@ import html
 import uuid
 import re
 import random
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
 
 import asyncpg
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.types import (
     Message,
     CallbackQuery,
     ChatPermissions,
     PreCheckoutQuery,
     LabeledPrice,
-    BotCommand
+    BotCommand,
+    TelegramObject
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -63,6 +65,7 @@ active_withdraws: Dict[str, dict] = {}
 active_gram_invoices: Dict[str, dict] = {}
 chat_recent_users: Dict[int, List[int]] = {}
 user_loss_streaks: Dict[int, int] = {}
+user_last_action: Dict[int, float] = {}
 
 
 def fmt_num(val: int) -> str:
@@ -284,6 +287,11 @@ class Database:
         async with self.pool.acquire() as conn:
             return await conn.fetchval("SELECT user_id FROM users WHERE LOWER(tg_username) = $1", clean_tag)
 
+    async def get_all_user_ids(self) -> List[int]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM users")
+            return [r["user_id"] for r in rows]
+
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -383,29 +391,46 @@ class Database:
 db = Database(DATABASE_URL)
 
 
-@dp.message.outer_middleware()
-async def auto_register_middleware(handler, event: Message, data: dict):
-    if event.from_user and not event.from_user.is_bot:
-        chat_id = event.chat.id if event.chat and event.chat.type in ["group", "supergroup"] else None
-        if chat_id:
-            if chat_id not in chat_recent_users:
-                chat_recent_users[chat_id] = []
-            if event.from_user.id not in chat_recent_users[chat_id]:
-                chat_recent_users[chat_id].append(event.from_user.id)
-                if len(chat_recent_users[chat_id]) > 50:
-                    chat_recent_users[chat_id].pop(0)
+# ================= АНТИСПАМ И РЕГИСТРАЦИЯ (MIDDLEWARE) =================
+class ThrottlingMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        if isinstance(event, (Message, CallbackQuery)) and event.from_user and not event.from_user.is_bot:
+            user_id = event.from_user.id
+            now = time.time()
+            last = user_last_action.get(user_id, 0.0)
 
-        if db.pool:
-            try:
-                await db.register_user(
-                    event.from_user.id, 
-                    event.from_user.full_name, 
-                    event.from_user.username,
-                    chat_id=chat_id
-                )
-            except Exception:
-                pass
-    return await handler(event, data)
+            # Ограничение: не чаще 1 действия в 1.2 сек
+            if now - last < 1.2:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("⏳ Не так быстро! Подождите секунду.", show_alert=False)
+                return
+            user_last_action[user_id] = now
+
+        if isinstance(event, Message) and event.from_user and not event.from_user.is_bot:
+            chat_id = event.chat.id if event.chat and event.chat.type in ["group", "supergroup"] else None
+            if chat_id:
+                if chat_id not in chat_recent_users:
+                    chat_recent_users[chat_id] = []
+                if event.from_user.id not in chat_recent_users[chat_id]:
+                    chat_recent_users[chat_id].append(event.from_user.id)
+                    if len(chat_recent_users[chat_id]) > 50:
+                        chat_recent_users[chat_id].pop(0)
+
+            if db.pool:
+                try:
+                    await db.register_user(
+                        event.from_user.id,
+                        event.from_user.full_name,
+                        event.from_user.username,
+                        chat_id=chat_id
+                    )
+                except Exception:
+                    pass
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(ThrottlingMiddleware())
+dp.callback_query.outer_middleware(ThrottlingMiddleware())
 
 
 # ================= КЛАВИАТУРЫ =================
@@ -1222,6 +1247,42 @@ async def process_stars_cmd(message: Message, args: List[str]):
     )
 
 
+async def process_broadcast_cmd(message: Message, args: List[str]):
+    if not await db.is_admin(message.from_user.id):
+        return
+
+    # Поддержка текста или пересланного сообщения
+    broadcast_text = None
+    if message.reply_to_message:
+        broadcast_text = message.reply_to_message.text or message.reply_to_message.caption
+    elif args:
+        broadcast_text = " ".join(args)
+
+    if not broadcast_text:
+        return await message.answer("❌ Формат: <code>рассылка [текст]</code> или ответом на сообщение.", parse_mode="HTML")
+
+    user_ids = await db.get_all_user_ids()
+    status_msg = await message.answer(f"📢 Начинаю рассылку для <b>{len(user_ids)}</b> игроков...", parse_mode="HTML")
+
+    success = 0
+    blocked = 0
+
+    for u_id in user_ids:
+        try:
+            await bot.send_message(chat_id=u_id, text=broadcast_text, parse_mode="HTML")
+            success += 1
+            await asyncio.sleep(0.04)  # Ограничение Telegram ~25-30 сообщений/сек
+        except Exception:
+            blocked += 1
+
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📬 Доставлено: <b>{success}</b>\n"
+        f"🚫 Заблокировали бота / Ошибка: <b>{blocked}</b>",
+        parse_mode="HTML"
+    )
+
+
 # ================= МАРШРУТИЗАТОР ВСЕХ КОМАНД =================
 @dp.message(F.text)
 async def handle_all_text_commands(message: Message):
@@ -1229,7 +1290,6 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
-    # 1. Статистика чата
     if full_text in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"]:
         return await process_chat_stats_cmd(message)
 
@@ -1246,7 +1306,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
     
-    # Игры (строгие команды, без го/гоу/кубы)
+    # Игры
     elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
         await process_dice_cmd(message, args)
     elif cmd in ["doubledice", "2dice", "дабл", "дубль", "2кубика"]:
@@ -1264,7 +1324,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
         await process_simple_bet(message, args, "odd")
     
-    # Личный кабинет (строгая проверка)
+    # Личный кабинет
     elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
         await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
@@ -1288,8 +1348,10 @@ async def handle_all_text_commands(message: Message):
         await process_stars_cmd(message, args)
     elif cmd in ["withdraw", "out", "вывод", "снять", "вывести"]:
         await process_withdraw_cmd(message, args)
-    
+
     # Админка
+    elif cmd in ["broadcast", "рассылка"]:
+        await process_broadcast_cmd(message, args)
     elif cmd in ["give", "выдать", "начислить", "сет"]:
         if not await db.is_admin(message.from_user.id):
             return
