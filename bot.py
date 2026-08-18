@@ -6,7 +6,7 @@ import uuid
 import re
 import random
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 import asyncpg
 from aiohttp import web
@@ -287,7 +287,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at, tg_username FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -475,6 +475,38 @@ def resolve_bet_amount(arg_val: Optional[str], current_balance: int) -> Optional
     return None
 
 
+async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Optional[int], str, List[str]]:
+    """Находит цель команды: через Reply, @username или user_id."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        return target.id, target.full_name, args
+
+    if not args:
+        return None, "Пользователь", args
+
+    first_arg = args[0].strip()
+    remaining_args = args[1:]
+
+    # Если передан ID
+    if first_arg.isdigit():
+        t_id = int(first_arg)
+        u_data = await db.get_user(t_id)
+        t_name = u_data[1] if u_data else f"ID {t_id}"
+        return t_id, t_name, remaining_args
+
+    # Если передан @username
+    if first_arg.startswith("@") or not first_arg.isdigit():
+        clean_tag = first_arg.replace("@", "")
+        t_id = await db.get_user_id_by_username(clean_tag)
+        if t_id:
+            u_data = await db.get_user(t_id)
+            t_name = u_data[1] if u_data else f"@{clean_tag}"
+            return t_id, t_name, remaining_args
+        return None, f"@{clean_tag}", remaining_args
+
+    return None, "Пользователь", args
+
+
 async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
     user = await db.get_user(user_id)
     user_bal = user[2] if user else 0
@@ -589,7 +621,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
         except Exception:
             pass
         res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{fmt_num(bet)} 💰</b> возвращена!"
-        await send_game_result(message, "draw", user_id=user_id, game_type="doubledice", bet=bet)
+        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
 
 
 async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
@@ -660,7 +692,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{fmt_num(balance)} монет</b>\n\n"
         f"📜 <b>Режимы игр (мин. ставка 100 💰 или «вабанк»):</b>\n"
-        f"⚔️ <code>дуэль [ставка/вабанк]</code> — дуэль 1 на 1 в чате (ответом)\n"
+        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль (ответом или по тегу)\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
         f"🎲🎲 <code>дабл [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
         f"🚀 <code>лесенка [ставка/вабанк]</code> — Кубическая Лесенка (до x7.5)\n"
@@ -675,7 +707,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"⭐ <code>звезды [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>вывод [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🤝 <code>реф</code> — реферальная ссылка (3%)\n"
-        f"💸 <code>перевод [сумма]</code> (ответом) — передать монеты"
+        f"💸 <code>перевод [сумма] @username</code> — передать монеты"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -822,37 +854,66 @@ async def process_ladder_cmd(message: Message, args: List[str]):
 
 
 async def process_duel_cmd(message: Message, args: List[str]):
-    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+    challenger = message.from_user
+    await db.register_user(challenger.id, challenger.full_name, challenger.username)
 
-    if not await check_subscription(message.from_user.id):
+    if not await check_subscription(challenger.id):
         return await message.answer("⚠️ <b>Для игры необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
 
-    if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Ответьте на сообщение игрока для вызова на дуэль!", parse_mode="HTML")
+    target_id, target_name = None, None
+    bet_raw = None
 
-    opponent = message.reply_to_message.from_user
-    challenger = message.from_user
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if target.is_bot:
+            return await message.answer("❌ Нельзя вызывать ботов на дуэль!", parse_mode="HTML")
+        target_id = target.id
+        target_name = target.full_name
+        bet_raw = args[0] if args else None
+    else:
+        # Разбор формата: "дуэль 500 @username" или "дуэль @username 500"
+        if not args:
+            return await message.answer("❌ Формат: <code>дуэль [ставка] @username</code> или ответом на сообщение.", parse_mode="HTML")
+        
+        for arg in args:
+            if arg.startswith("@") or (arg.isdigit() and len(arg) > 6 and int(arg) > 1000000):
+                clean_tag = arg.replace("@", "")
+                if arg.isdigit():
+                    t_id = int(arg)
+                else:
+                    t_id = await db.get_user_id_by_username(clean_tag)
+                
+                if t_id:
+                    target_id = t_id
+                    u_data = await db.get_user(t_id)
+                    target_name = u_data[1] if u_data else f"@{clean_tag}"
+            else:
+                bet_raw = arg
 
-    if opponent.id == challenger.id:
+    if not target_id:
+        return await message.answer("❌ Укажите игрока через <code>@username</code> или ответьте на его сообщение!", parse_mode="HTML")
+
+    if target_id == challenger.id:
         return await message.answer("❌ Нельзя играть с самим собой!", parse_mode="HTML")
 
     c_data = await db.get_user(challenger.id)
     c_bal = c_data[2] if c_data else 0
 
-    bet = resolve_bet_amount(args[0] if args else None, c_bal)
+    bet = resolve_bet_amount(bet_raw, c_bal)
     if bet is None:
         return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка для дуэли: <b>100 💰</b>! У вас: <code>{fmt_num(c_bal)} 💰</code>", parse_mode="HTML")
 
-    await db.register_user(opponent.id, opponent.full_name, opponent.username)
-    o_data = await db.get_user(opponent.id)
+    o_data = await db.get_user(target_id)
+    if not o_data:
+        return await message.answer("❌ Выбранный игрок еще не зарегистрирован в боте!", parse_mode="HTML")
 
-    if not c_data or c_bal < bet:
+    if c_bal < bet:
         return await message.answer(f"❌ У вас недостаточно монет! Баланс: <code>{fmt_num(c_bal)} 💰</code>", parse_mode="HTML")
-    if not o_data or o_data[2] < bet:
-        return await message.answer(f"❌ У оппонента недостаточно монет для этой ставки! Баланс оппонента: <code>{fmt_num(o_data[2] if o_data else 0)} 💰</code>", parse_mode="HTML")
+    if o_data[2] < bet:
+        return await message.answer(f"❌ У оппонента недостаточно монет для этой ставки! Баланс оппонента: <code>{fmt_num(o_data[2])} 💰</code>", parse_mode="HTML")
 
     duel_id = uuid.uuid4().hex[:8]
 
@@ -860,8 +921,8 @@ async def process_duel_cmd(message: Message, args: List[str]):
         "chat_id": message.chat.id,
         "challenger_id": challenger.id,
         "challenger_name": challenger.full_name,
-        "opponent_id": opponent.id,
-        "opponent_name": opponent.full_name,
+        "opponent_id": target_id,
+        "opponent_name": target_name,
         "bet": bet,
         "status": "pending"
     }
@@ -871,7 +932,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
         f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
         f"{is_allin}"
         f"🔴 Вызывающий: {get_mention(challenger.id, challenger.full_name)}\n"
-        f"🔵 Оппонент: {get_mention(opponent.id, opponent.full_name)}\n"
+        f"🔵 Оппонент: {get_mention(target_id, target_name)}\n"
         f"💰 Ставка: <b>{fmt_num(bet)} 💰</b> (Приз: <b>+{fmt_num(int(bet * 1.95))} 💰</b>)\n\n"
         f"<i>У оппонента 60 секунд на принятие.</i>"
     )
@@ -887,14 +948,22 @@ async def process_duel_cmd(message: Message, args: List[str]):
             pass
 
 
-async def process_profile_cmd(message: Message):
+async def process_profile_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
+    target_id, target_name, _ = await resolve_target_user(message, args)
+    
+    if target_id:
+        user_id = target_id
+
     user = await db.get_user(user_id)
     if not user:
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        user = await db.get_user(user_id)
+        if user_id == message.from_user.id:
+            await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
+            user = await db.get_user(user_id)
+        else:
+            return await message.answer("❌ Пользователь не найден в базе данных!", parse_mode="HTML")
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date = user
+    _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u = user
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
     dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
@@ -931,19 +1000,41 @@ async def process_top_cmd(message: Message):
 
 
 async def process_pay_cmd(message: Message, args: List[str]):
-    if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-        return await message.answer("❌ Ответьте на сообщение игрока для перевода!", parse_mode="HTML")
-
-    recipient = message.reply_to_message.from_user
     sender = message.from_user
-
-    if recipient.id == sender.id:
-        return await message.answer("❌ Нельзя переводить монеты самому себе!", parse_mode="HTML")
-
     sender_data = await db.get_user(sender.id)
     sender_bal = sender_data[2] if sender_data else 0
 
-    amount = resolve_bet_amount(args[0] if args else None, sender_bal)
+    recipient_id, recipient_name = None, None
+    amount_raw = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if target.is_bot:
+            return await message.answer("❌ Нельзя переводить монеты ботам!", parse_mode="HTML")
+        recipient_id = target.id
+        recipient_name = target.full_name
+        amount_raw = args[0] if args else None
+    else:
+        if not args:
+            return await message.answer("❌ Формат: <code>перевод [сумма] @username</code> или ответом на сообщение.", parse_mode="HTML")
+        for arg in args:
+            if arg.startswith("@") or (arg.isdigit() and len(arg) > 6 and int(arg) > 1000000):
+                clean_tag = arg.replace("@", "")
+                t_id = int(arg) if arg.isdigit() else await db.get_user_id_by_username(clean_tag)
+                if t_id:
+                    recipient_id = t_id
+                    u_data = await db.get_user(t_id)
+                    recipient_name = u_data[1] if u_data else f"@{clean_tag}"
+            else:
+                amount_raw = arg
+
+    if not recipient_id:
+        return await message.answer("❌ Укажите получателя: <code>перевод 500 @username</code>", parse_mode="HTML")
+
+    if recipient_id == sender.id:
+        return await message.answer("❌ Нельзя переводить монеты самому себе!", parse_mode="HTML")
+
+    amount = resolve_bet_amount(amount_raw, sender_bal)
     if amount is None or amount <= 0:
         return await message.answer("❌ Укажите корректную сумму: <code>перевод 100</code> или <code>перевод вабанк</code>", parse_mode="HTML")
 
@@ -951,14 +1042,14 @@ async def process_pay_cmd(message: Message, args: List[str]):
         return await message.answer(f"❌ Недостаточно монет для перевода! Ваш баланс: <code>{fmt_num(sender_bal)} 💰</code>", parse_mode="HTML")
 
     await db.register_user(sender.id, sender.full_name, sender.username)
-    await db.register_user(recipient.id, recipient.full_name, recipient.username)
+    await db.register_user(recipient_id, recipient_name)
 
     await db.change_balance(sender.id, -amount)
-    await db.change_balance(recipient.id, amount)
+    await db.change_balance(recipient_id, amount)
 
     await message.answer(
         f"💸 {get_mention(sender.id, sender.full_name)} перевел <b>{fmt_num(amount)} 💰</b> "
-        f"игроку {get_mention(recipient.id, recipient.full_name)}!",
+        f"игроку {get_mention(recipient_id, recipient_name)}!",
         parse_mode="HTML"
     )
 
@@ -1161,7 +1252,7 @@ async def handle_all_text_commands(message: Message):
         await process_simple_bet(message, args, "odd")
     
     elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата", "я", "монетки", "монеты", "счет", "счёт"]:
-        await process_profile_cmd(message)
+        await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "пригласить", "ссылка", "партнерка"]:
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
@@ -1184,60 +1275,78 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["withdraw", "out", "вывод", "снять", "вывести", "обнал", "кешаут"]:
         await process_withdraw_cmd(message, args)
     
+    # Админка
     elif cmd in ["give", "выдать", "начислить", "сет"]:
         if not await db.is_admin(message.from_user.id):
             return
-        if not message.reply_to_message or message.reply_to_message.from_user.is_bot:
-            return await message.answer("❌ Ответьте на сообщение игрока для выдачи!", parse_mode="HTML")
-        if not args:
-            return await message.answer("❌ Укажите сумму: <code>выдать 1000</code>", parse_mode="HTML")
+        
+        target_id, target_name, rest = await resolve_target_user(message, args)
+        amount_raw = None
+
+        if target_id and rest:
+            amount_raw = rest[0]
+        elif not target_id and args:
+            amount_raw = args[0]
+            target_id, target_name, _ = await resolve_target_user(message, args[1:])
+
+        if not target_id or not amount_raw:
+            return await message.answer("❌ Формат: <code>выдать 1000 @username</code> или ответом на сообщение.", parse_mode="HTML")
+
         try:
-            amount = int(args[0])
+            amount = int(amount_raw)
         except ValueError:
             return await message.answer("❌ Сумма должна быть числом!", parse_mode="HTML")
-        target = message.reply_to_message.from_user
-        await db.register_user(target.id, target.full_name, target.username)
-        await db.change_balance(target.id, amount)
+
+        await db.register_user(target_id, target_name)
+        await db.change_balance(target_id, amount)
         verb = "выдал" if amount >= 0 else "забрал"
-        await message.answer(f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target.id, target.full_name)}!", parse_mode="HTML")
+        await message.answer(f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!", parse_mode="HTML")
+
     elif cmd in ["mute", "мут", "завалить", "замутить"]:
         if not await db.is_admin(message.from_user.id):
             return
-        target = message.reply_to_message.from_user if message.reply_to_message else None
-        if not target:
-            return await message.answer("❌ Ответьте на сообщение нарушителя!", parse_mode="HTML")
-        if target.id == OWNER_ID or await db.is_admin(target.id):
+        
+        target_id, target_name, rest = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите игрока: <code>мут @username 10м Спам</code> или ответом на сообщение.", parse_mode="HTML")
+
+        if target_id == OWNER_ID or await db.is_admin(target_id):
             return await message.answer("❌ Нельзя замутить администратора!", parse_mode="HTML")
         
         duration_sec = 600
         reason = "Без причины"
         
-        if args:
-            parsed = parse_time_string(args[0])
+        if rest:
+            parsed = parse_time_string(rest[0])
             if parsed is not None:
                 duration_sec = max(30, parsed)
-                if len(args) > 1:
-                    reason = " ".join(args[1:])
+                if len(rest) > 1:
+                    reason = " ".join(rest[1:])
             else:
-                reason = " ".join(args)
+                reason = " ".join(rest)
         
         try:
             until = datetime.now() + timedelta(seconds=duration_sec)
             await message.chat.restrict(
-                user_id=target.id,
+                user_id=target_id,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until
             )
-            await message.answer(f"🔇 {get_mention(target.id, target.full_name)} отправлен в мут на <b>{format_duration(duration_sec)}</b>\n📝 Причина: {html.escape(reason)}", parse_mode="HTML")
+            await message.answer(f"🔇 {get_mention(target_id, target_name)} отправлен в мут на <b>{format_duration(duration_sec)}</b>\n📝 Причина: {html.escape(reason)}", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
+
     elif cmd in ["unmute", "размут", "снятьмут"]:
-        if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+        if not await db.is_admin(message.from_user.id):
             return
-        target = message.reply_to_message.from_user
+        
+        target_id, target_name, _ = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите пользователя: <code>размут @username</code> или ответом на сообщение.", parse_mode="HTML")
+
         try:
             await message.chat.restrict(
-                user_id=target.id,
+                user_id=target_id,
                 permissions=ChatPermissions(
                     can_send_messages=True,
                     can_send_audios=True,
@@ -1251,81 +1360,74 @@ async def handle_all_text_commands(message: Message):
                     can_add_web_page_previews=True
                 )
             )
-            await message.answer(f"🔊 {get_mention(target.id, target.full_name)} размучен.", parse_mode="HTML")
+            await message.answer(f"🔊 {get_mention(target_id, target_name)} размучен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
+
     elif cmd in ["ban", "бан", "забанить", "кик", "kick"]:
         if not await db.is_admin(message.from_user.id):
             return
-        target_id = None
-        target_name = "Пользователь"
-        if message.reply_to_message:
-            target = message.reply_to_message.from_user
-            target_id = target.id
-            target_name = target.full_name
-        elif args:
-            arg = args[0].strip()
-            if arg.isdigit():
-                target_id = int(arg)
-            else:
-                target_id = await db.get_user_id_by_username(arg)
-                if not target_id:
-                    return await message.answer(f"❌ Пользователь <code>{arg}</code> не найден в БД!", parse_mode="HTML")
+        
+        target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
-            return await message.answer("Использование: <code>бан @username</code> или ответом на сообщение.", parse_mode="HTML")
+            return await message.answer("❌ Использование: <code>бан @username</code> или ответом на сообщение.", parse_mode="HTML")
+
         if target_id == OWNER_ID or await db.is_admin(target_id):
             return await message.answer("❌ Нельзя наказать администратора!", parse_mode="HTML")
+
         try:
             await message.chat.ban(user_id=target_id)
             await message.answer(f"🛑 {get_mention(target_id, target_name)} забанен.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка при бане: {e}", parse_mode="HTML")
+
     elif cmd in ["unban", "разбан", "снятьбан"]:
         if not await db.is_admin(message.from_user.id):
             return
-        target_id = None
-        if message.reply_to_message:
-            target_id = message.reply_to_message.from_user.id
-        elif args:
-            arg = args[0].strip()
-            if arg.isdigit():
-                target_id = int(arg)
-            else:
-                target_id = await db.get_user_id_by_username(arg)
-                if not target_id:
-                    return await message.answer(f"❌ Пользователь с тегом <code>{arg}</code> не найден в базе данных!", parse_mode="HTML")
+        
+        target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
-            return await message.answer("Использование: <code>разбан @username</code> или <code>разбан 12345678</code>", parse_mode="HTML")
+            return await message.answer("❌ Использование: <code>разбан @username</code> или <code>разбан 12345678</code>", parse_mode="HTML")
+
         try:
             await message.chat.unban(user_id=target_id, only_if_banned=True)
-            await message.answer(f"✅ Пользователь (ID: <code>{target_id}</code>) успешно разбанен в чате!", parse_mode="HTML")
+            await message.answer(f"✅ Пользователь {get_mention(target_id, target_name)} успешно разбанен в чате!", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка разбана: {e}", parse_mode="HTML")
+
     elif cmd in ["warn", "варн", "пред", "предупреждение"]:
         if not await db.is_admin(message.from_user.id):
             return
-        target = message.reply_to_message.from_user if message.reply_to_message else None
-        if not target:
-            return await message.answer("❌ Ответьте на сообщение нарушителя!", parse_mode="HTML")
-        if target.id == OWNER_ID or await db.is_admin(target.id):
+        
+        target_id, target_name, _ = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите игрока: <code>варн @username</code> или ответом на сообщение.", parse_mode="HTML")
+
+        if target_id == OWNER_ID or await db.is_admin(target_id):
             return await message.answer("❌ Нельзя выдать варн администратору!", parse_mode="HTML")
-        await db.register_user(target.id, target.full_name, target.username)
-        warns = await db.add_warn(target.id)
+
+        await db.register_user(target_id, target_name)
+        warns = await db.add_warn(target_id)
         if warns >= 3:
             try:
-                await message.chat.ban(user_id=target.id)
-                await db.reset_warns(target.id)
-                await message.answer(f"🛑 {get_mention(target.id, target.full_name)} набрал <b>3/3 варнов</b> и получил бан!", parse_mode="HTML")
+                await message.chat.ban(user_id=target_id)
+                await db.reset_warns(target_id)
+                await message.answer(f"🛑 {get_mention(target_id, target_name)} набрал <b>3/3 варнов</b> и получил бан!", parse_mode="HTML")
             except Exception as e:
                 await message.answer(f"❌ Ошибка при бане: {e}")
         else:
-            await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
+            await message.answer(f"⚠️ {get_mention(target_id, target_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
+
     elif cmd in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
-        if not await db.is_admin(message.from_user.id) or not message.reply_to_message:
+        if not await db.is_admin(message.from_user.id):
             return
-        target = message.reply_to_message.from_user
-        await db.reset_warns(target.id)
-        await message.answer(f"✅ Предупреждения игрока {get_mention(target.id, target.full_name)} аннулированы.", parse_mode="HTML")
+        
+        target_id, target_name, _ = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите игрока: <code>разварн @username</code> или ответом на сообщение.", parse_mode="HTML")
+
+        await db.reset_warns(target_id)
+        await message.answer(f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.", parse_mode="HTML")
 
 
 # ================= CALLBACKS =================
