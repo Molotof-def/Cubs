@@ -70,7 +70,13 @@ def get_mention(user_id: int, name: Optional[str]) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-async def send_game_result(message: Message, result_type: str, caption: str, user_id: Optional[int] = None, reply_markup=None):
+def replay_keyboard(game_type: str, bet: int, user_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"🔄 Реванш ({bet} 💰)", callback_data=f"rep_{game_type}_{bet}_{user_id}")
+    return builder.as_markup()
+
+
+async def send_game_result(message: Message, result_type: str, caption: str, user_id: Optional[int] = None, game_type: Optional[str] = None, bet: Optional[int] = None, reply_markup=None):
     banners = {
         "win": "🏆 <b>ПОБЕДА!</b>\n\n",
         "loss": "💀 <b>ПОРАЖЕНИЕ!</b>\n\n",
@@ -90,24 +96,64 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
     img_map = {"win": IMG_WIN, "loss": IMG_LOSS, "draw": IMG_DRAW}
     photo_url = img_map.get(result_type)
 
+    final_markup = reply_markup
+    if not final_markup and game_type and bet and user_id:
+        final_markup = replay_keyboard(game_type, bet, user_id)
+
     if photo_url:
         try:
             await message.answer_photo(
                 photo=photo_url,
                 caption=full_caption,
                 parse_mode="HTML",
-                reply_markup=reply_markup
+                reply_markup=final_markup
             )
             return
         except Exception as e:
             logging.warning(f"Ошибка отправки фото ({e}), переключение на текст.")
 
     try:
-        await message.answer(text=full_caption, parse_mode="HTML", reply_markup=reply_markup)
+        await message.answer(text=full_caption, parse_mode="HTML", reply_markup=final_markup)
     except Exception as e:
         logging.error(f"HTML error: {e}")
         clean_text = re.sub(r'<[^>]+>', '', full_caption)
-        await message.answer(text=clean_text, reply_markup=reply_markup)
+        await message.answer(text=clean_text, reply_markup=final_markup)
+
+
+def parse_time_string(time_str: str) -> Optional[int]:
+    """Парсит строки вида 30с, 15м, 2ч, 1д, 7н в секунды."""
+    match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", time_str.strip().lower())
+    if not match:
+        return None
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    if not unit or unit in ["м", "m", "мин", "min", "минут", "минуты", "минута"]:
+        return value * 60
+    elif unit in ["с", "s", "сек", "sec", "секунд", "секунды", "секунда"]:
+        return value
+    elif unit in ["ч", "h", "час", "часа", "часов", "hour", "hours"]:
+        return value * 3600
+    elif unit in ["д", "d", "день", "дня", "дней", "day", "days"]:
+        return value * 86400
+    elif unit in ["н", "w", "нед", "неделя", "недели", "недель", "week", "weeks"]:
+        return value * 604800
+    
+    return None
+
+
+def format_duration(seconds: int) -> str:
+    if seconds >= 86400:
+        days = seconds // 86400
+        return f"{days} дн."
+    elif seconds >= 3600:
+        hours = seconds // 3600
+        return f"{hours} ч."
+    elif seconds >= 60:
+        mins = seconds // 60
+        return f"{mins} мин."
+    return f"{seconds} сек."
 
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
@@ -545,7 +591,7 @@ async def process_dice_cmd(message: Message, args: List[str]):
             f"💰 Коэффициент: <b>x1.95</b>\n"
             f"💵 Выигрыш: <b>+{win} 💰</b>"
         )
-        await send_game_result(message, "win", text, user_id=user_id)
+        await send_game_result(message, "win", text, user_id=user_id, game_type="dice", bet=bet)
     elif p_val < b_val:
         try:
             await db.record_game(user_id, "loss")
@@ -557,7 +603,7 @@ async def process_dice_cmd(message: Message, args: List[str]):
             f"👤 {get_mention(user_id, message.from_user.full_name)}\n"
             f"📉 Потеряно: <b>-{bet} 💰</b>"
         )
-        await send_game_result(message, "loss", text, user_id=user_id)
+        await send_game_result(message, "loss", text, user_id=user_id, game_type="dice", bet=bet)
     else:
         await db.change_balance(user_id, bet)
         try:
@@ -568,7 +614,7 @@ async def process_dice_cmd(message: Message, args: List[str]):
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
             f"💰 <b>Возврат ставки:</b> <code>+{bet} 💰</code>"
         )
-        await send_game_result(message, "draw", text, user_id=user_id)
+        await send_game_result(message, "draw", text, user_id=user_id, game_type="dice", bet=bet)
 
 
 async def process_doubledice_cmd(message: Message, args: List[str]):
@@ -622,7 +668,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
 
         bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
         res = f"👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{win} 💰</b>"
-        await send_game_result(message, "win", res, user_id=user_id)
+        await send_game_result(message, "win", res, user_id=user_id, game_type="doubledice", bet=bet)
     elif p_sum < b_sum:
         try:
             await db.record_game(user_id, "loss")
@@ -630,7 +676,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
         except Exception as e:
             logging.error(f"Ошибка фиксации поражения: {e}")
         res = f"👤 {get_mention(user_id, message.from_user.full_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{bet} 💰</b>"
-        await send_game_result(message, "loss", res, user_id=user_id)
+        await send_game_result(message, "loss", res, user_id=user_id, game_type="doubledice", bet=bet)
     else:
         await db.change_balance(user_id, bet)
         try:
@@ -638,7 +684,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
         except Exception:
             pass
         res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{bet} 💰</b> возвращена!"
-        await send_game_result(message, "draw", user_id=user_id)
+        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
 
 
 async def process_simple_bet(message: Message, args: List[str], game_type: str):
@@ -695,7 +741,7 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
         except Exception:
             pass
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
-        await send_game_result(message, "win", res, user_id=user_id)
+        await send_game_result(message, "win", res, user_id=user_id, game_type=game_type, bet=bet)
     else:
         try:
             await db.record_game(user_id, "loss")
@@ -703,7 +749,7 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
         except Exception as e:
             logging.error(f"Ошибка фиксации проигрыша: {e}")
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
-        await send_game_result(message, "loss", res, user_id=user_id)
+        await send_game_result(message, "loss", res, user_id=user_id, game_type=game_type, bet=bet)
 
 
 async def process_ladder_cmd(message: Message, args: List[str]):
@@ -1058,7 +1104,6 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
-    # 1. ПРИОРИТЕТ: Составные фразы для статистики чата
     if full_text in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"]:
         return await process_chat_stats_cmd(message)
 
@@ -1072,7 +1117,6 @@ async def handle_all_text_commands(message: Message):
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
 
-    # Статистика чата (однословные вызовы)
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
     
@@ -1144,16 +1188,27 @@ async def handle_all_text_commands(message: Message):
             return await message.answer("❌ Ответьте на сообщение нарушителя!", parse_mode="HTML")
         if target.id == OWNER_ID or await db.is_admin(target.id):
             return await message.answer("❌ Нельзя замутить администратора!", parse_mode="HTML")
-        mins = int(args[0]) if args and args[0].isdigit() else 10
-        reason = " ".join(args[1:]) if len(args) > 1 else "Без причины"
+        
+        duration_sec = 600
+        reason = "Без причины"
+        
+        if args:
+            parsed = parse_time_string(args[0])
+            if parsed is not None:
+                duration_sec = max(30, parsed)
+                if len(args) > 1:
+                    reason = " ".join(args[1:])
+            else:
+                reason = " ".join(args)
+        
         try:
-            until = datetime.now() + timedelta(minutes=mins)
+            until = datetime.now() + timedelta(seconds=duration_sec)
             await message.chat.restrict(
                 user_id=target.id,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until
             )
-            await message.answer(f"🔇 {get_mention(target.id, target.full_name)} отправлен в мут на {mins} мин.\n📝 Причина: {reason}", parse_mode="HTML")
+            await message.answer(f"🔇 {get_mention(target.id, target.full_name)} отправлен в мут на <b>{format_duration(duration_sec)}</b>\n📝 Причина: {html.escape(reason)}", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
     elif cmd in ["unmute", "размут", "снятьмут"]:
@@ -1242,7 +1297,7 @@ async def handle_all_text_commands(message: Message):
                 await db.reset_warns(target.id)
                 await message.answer(f"🛑 {get_mention(target.id, target.full_name)} набрал <b>3/3 варнов</b> и получил бан!", parse_mode="HTML")
             except Exception as e:
-                await message.answer(f"❌ Ошибка при бане: {e}", parse_mode="HTML")
+                await message.answer(f"❌ Ошибка при бане: {e}")
         else:
             await message.answer(f"⚠️ {get_mention(target.id, target.full_name)} получил варн (<b>{warns}/3</b>)!", parse_mode="HTML")
     elif cmd in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
@@ -1254,6 +1309,32 @@ async def handle_all_text_commands(message: Message):
 
 
 # ================= CALLBACKS =================
+@dp.callback_query(F.data.startswith("rep_"))
+async def cb_quick_replay(call: CallbackQuery):
+    parts = call.data.split("_")
+    if len(parts) < 4:
+        return await call.answer("❌ Ошибка параметров!", show_alert=True)
+    
+    game_type = parts[1]
+    try:
+        bet = int(parts[2])
+        allowed_user_id = int(parts[3])
+    except ValueError:
+        return await call.answer("❌ Ошибка данных!", show_alert=True)
+
+    if call.from_user.id != allowed_user_id:
+        return await call.answer("❌ Это не ваша кнопка реванша!", show_alert=True)
+
+    await call.answer()
+    
+    if game_type == "dice":
+        await process_dice_cmd(call.message, [str(bet)])
+    elif game_type == "doubledice":
+        await process_doubledice_cmd(call.message, [str(bet)])
+    elif game_type in ["over", "under", "even", "odd"]:
+        await process_simple_bet(call.message, [str(bet)], game_type)
+
+
 @dp.callback_query(F.data.startswith("ac_"))
 async def cb_accept_duel(call: CallbackQuery):
     duel_id = call.data.replace("ac_", "")
