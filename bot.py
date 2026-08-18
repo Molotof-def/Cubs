@@ -767,7 +767,7 @@ async def process_dice_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
+        return
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -787,7 +787,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
+        return
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -807,7 +807,7 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
+        return
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -830,7 +830,7 @@ async def process_ladder_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
+        return
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка в Лесенке: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -955,12 +955,20 @@ async def process_duel_cmd(message: Message, args: List[str]):
 
 
 async def process_profile_cmd(message: Message, args: List[str]):
+    # Если аргументов больше 1 и это не тег/ID — это обычный текст, игнорируем
+    if len(args) > 1:
+        return
+    
+    if len(args) == 1:
+        arg = args[0].strip()
+        if not arg.startswith("@") and not (arg.isdigit() and len(arg) >= 6):
+            return
+
     req_user_id = message.from_user.id
     target_id, target_name, _ = await resolve_target_user(message, args)
     
     view_user_id = target_id if target_id else req_user_id
 
-    # Проверка на вызов профиля самого бота
     me = await bot.get_me()
     if view_user_id == me.id:
         return
@@ -986,7 +994,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
     dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
-    privacy_badge = " [🔒 Приватный]" if is_private else ""
+    privacy_badge = " 🔒" if is_private else ""
 
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, name)}{privacy_badge}\n"
@@ -1239,7 +1247,7 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
-    # 1. Приватность профиля (строгие команды)
+    # 1. Приватность профиля (строгие фразы)
     if full_text in ["-профиль", "-profile", "скрыть профиль", "закрыть профиль"]:
         await db.set_privacy(message.from_user.id, True)
         return await message.answer("🔒 <b>Ваш профиль теперь скрыт!</b> Другие игроки не увидят ваш баланс и статистику.", parse_mode="HTML")
@@ -1265,28 +1273,28 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
     
-    # Игры
-    elif cmd in ["dice", "кубик", "кубики", "кубы", "кость", "кости", "куб", "бросок", "го", "гоу", "играть", "play"]:
+    # Игры (убраны паразитные фразы "го", "гоу", "кубы" и т.д.)
+    elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
         await process_dice_cmd(message, args)
-    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "двойной", "пара", "два", "2кубика"]:
+    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "2кубика"]:
         await process_doubledice_cmd(message, args)
-    elif cmd in ["ladder", "лесенка", "лестница", "ступень", "подъем", "горка"]:
+    elif cmd in ["ladder", "лесенка", "лестница", "ступень"]:
         await process_ladder_cmd(message, args)
-    elif cmd in ["duel", "дуэль", "бой", "пвп", "pvp", "вызов", "дуели", "дуель"]:
+    elif cmd in ["duel", "дуэль", "вызов", "дуели", "дуель"]:
         await process_duel_cmd(message, args)
-    elif cmd in ["over", "больше", "бол", "хай", "high", ">", "верх"]:
+    elif cmd in ["over", "больше", "бол", "хай", "high"]:
         await process_simple_bet(message, args, "over")
-    elif cmd in ["under", "меньше", "мен", "лоу", "low", "<", "низ"]:
+    elif cmd in ["under", "меньше", "мен", "лоу", "low"]:
         await process_simple_bet(message, args, "under")
-    elif cmd in ["even", "чет", "четное", "чёт", "чётное", "ч"]:
+    elif cmd in ["even", "чет", "четное", "чёт", "чётное"]:
         await process_simple_bet(message, args, "even")
-    elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное", "н", "нч"]:
+    elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
         await process_simple_bet(message, args, "odd")
     
-    # Личный кабинет (строгая проверка: вызов только как отдельная команда)
-    elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата", "монетки", "монеты", "счет", "счёт"]:
+    # Личный кабинет (строгая проверка)
+    elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
         await process_profile_cmd(message, args)
-    elif cmd in ["ref", "реф", "рефералы", "друзья", "пригласить", "ссылка", "партнерка"]:
+    elif cmd in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
         ref_count = await db.get_referrals_count(message.from_user.id)
@@ -1297,15 +1305,15 @@ async def handle_all_text_commands(message: Message):
             f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
         )
         await message.answer(text_ref, parse_mode="HTML")
-    elif cmd in ["top", "топ", "лидеры", "богачи", "список", "рейтинг", "таблица"]:
+    elif cmd in ["top", "топ", "лидеры", "богачи"]:
         await process_top_cmd(message)
-    elif cmd in ["pay", "передать", "перевод", "дать", "скинуть", "отдать", "поделиться"]:
+    elif cmd in ["pay", "передать", "перевод"]:
         await process_pay_cmd(message, args)
-    elif cmd in ["gram", "ton", "тон", "грам", "крипта", "деп", "пополнитьтон", "депозит"]:
+    elif cmd in ["gram", "ton", "тон", "грам", "крипта", "деп", "депозит"]:
         await process_gram_cmd(message, args)
-    elif cmd in ["stars", "звезды", "звёзды", "донат", "donate", "пополнить", "купить"]:
+    elif cmd in ["stars", "звезды", "звёзды", "донат", "donate"]:
         await process_stars_cmd(message, args)
-    elif cmd in ["withdraw", "out", "вывод", "снять", "вывести", "обнал", "кешаут"]:
+    elif cmd in ["withdraw", "out", "вывод", "снять", "вывести"]:
         await process_withdraw_cmd(message, args)
     
     # Админка
