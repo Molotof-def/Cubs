@@ -185,8 +185,6 @@ async def check_subscription(user_id: int) -> bool:
 
     try:
         member = await bot.get_chat_member(chat_id=target, user_id=user_id)
-        
-        # Если проверка успешна, кэшируем ID чата для стабильности
         if not resolved_channel_id and hasattr(member, "chat"):
             resolved_channel_id = member.chat.id
 
@@ -203,10 +201,8 @@ async def check_subscription(user_id: int) -> bool:
     except Exception as e:
         err_msg = str(e).lower()
         logging.warning(f"Ошибка проверки подписки {user_id} в {target}: {e}")
-        # Если пользователь не найден в чате Telegram возвращает ошибку - значит не подписан
         if "user not found" in err_msg or "participant_id_invalid" in err_msg:
             return False
-        # Если бот не админ в канале
         if "chat not found" in err_msg or "bot is not a member" in err_msg:
             return True
         return False
@@ -667,7 +663,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
         except Exception:
             pass
         res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{fmt_num(bet)} 💰</b> возвращена!"
-        await send_game_result(message, "draw", user_id=user_id, game_type="doubledice", bet=bet)
+        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
 
 
 async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
@@ -1574,7 +1570,7 @@ async def handle_all_text_commands(message: Message):
         await message.answer(f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.", parse_mode="HTML")
 
 
-# ================= CALLBACKS =================
+# ================= CALLBACKС =================
 @dp.callback_query(F.data.startswith("rep_"))
 async def cb_quick_replay(call: CallbackQuery):
     if not await check_subscription(call.from_user.id):
@@ -1814,7 +1810,7 @@ async def cb_ladder_cash(call: CallbackQuery):
     await send_game_result(call.message, "win", res, user_id=user_id)
 
 
-# ================= ЗАЩИЩЕННЫЙ CALLBACK «Я ОПЛАТИЛ» =================
+# ================= CALLBACK ЗАЩИТА ТОН =================
 @dp.callback_query(F.data.startswith("gcheck:"))
 async def cb_gram_check(call: CallbackQuery):
     parts = call.data.split(":")
