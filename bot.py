@@ -410,7 +410,7 @@ def ladder_keyboard(user_id: int, step: int):
     return builder.as_markup()
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СТАВОК =================
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 def resolve_bet_amount(arg_val: Optional[str], current_balance: int) -> Optional[int]:
     if not arg_val:
         return 100
@@ -418,7 +418,7 @@ def resolve_bet_amount(arg_val: Optional[str], current_balance: int) -> Optional
     val_lower = arg_val.lower().strip()
     allin_aliases = ["вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", "фул", "макс", "max", "оллин", "all-in", "баланс"]
     if val_lower in allin_aliases:
-        return current_balance
+        return max(0, current_balance)
 
     if val_lower.isdigit():
         return int(val_lower)
@@ -682,25 +682,28 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
         win_cond = True
     elif game_type == "under" and val in [1, 2, 3]:
         win_cond = True
-    elif game_type == "even" and val % 2 == 0:
+    elif game_type == "even" and (val % 2 == 0):
         win_cond = True
-    elif game_type == "odd" and val % 2 != 0:
+    elif game_type == "odd" and (val % 2 != 0):
         win_cond = True
 
     if win_cond:
         win = int(bet * 1.95)
         await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
+        try:
+            await db.record_game(user_id, "win")
+        except Exception:
+            pass
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n💰 Множитель: <b>x1.95</b>\n💵 Выигрыш: <b>+{win} 💰</b>"
         await send_game_result(message, "win", res, user_id=user_id)
     else:
         try:
             await db.record_game(user_id, "loss")
             await db.process_referral_loss(user_id, bet)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Ошибка фиксации проигрыша: {e}")
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, message.from_user.full_name)}\n📉 Потеряно: <b>-{bet} 💰</b>"
-        await send_game_result(message, "loss", user_id=user_id)
+        await send_game_result(message, "loss", res, user_id=user_id)
 
 
 async def process_ladder_cmd(message: Message, args: List[str]):
