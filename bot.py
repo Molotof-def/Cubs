@@ -162,11 +162,8 @@ def format_duration(seconds: int) -> str:
     return f"{seconds} сек."
 
 
-# ================= ПРОВЕРКА ПОДПИСКИ =================
+# ================= ПРОВЕРКА ПОДПИСКИ (ОБЯЗАТЕЛЬНА ДЛЯ ВСЕХ) =================
 async def check_subscription(user_id: int) -> bool:
-    if user_id == OWNER_ID:
-        return True
-
     if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", "", "None"]:
         return True
 
@@ -185,7 +182,7 @@ async def check_subscription(user_id: int) -> bool:
         return False
     except Exception as e:
         err_msg = str(e).lower()
-        if "chat not found" in err_msg or "admin" in err_msg or "not a member" in err_msg or "member list is inaccessible" in err_msg:
+        if "chat not found" in err_msg or "bot is not a member" in err_msg or "member list is inaccessible" in err_msg:
             logging.error(f"⚠️ Бот должен быть АДМИНИСТРАТОРОМ канала {chat_target}! Пропуск проверки.")
             return True
         logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
@@ -399,7 +396,6 @@ class ThrottlingMiddleware(BaseMiddleware):
             now = time.time()
             last = user_last_action.get(user_id, 0.0)
 
-            # Ограничение: не чаще 1 действия в 1.2 сек
             if now - last < 1.2:
                 if isinstance(event, CallbackQuery):
                     await event.answer("⏳ Не так быстро! Подождите секунду.", show_alert=False)
@@ -740,6 +736,9 @@ async def process_chat_stats_cmd(message: Message):
     if message.chat.type not in ["group", "supergroup"]:
         return await message.answer("❌ Статистика чата доступна только в группах!", parse_mode="HTML")
 
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Для использования бота необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     await db.register_user(
         message.from_user.id,
         message.from_user.full_name,
@@ -972,6 +971,9 @@ async def process_duel_cmd(message: Message, args: List[str]):
 
 
 async def process_profile_cmd(message: Message, args: List[str]):
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Для использования бота необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     if len(args) > 1:
         return
     
@@ -1018,6 +1020,9 @@ async def process_profile_cmd(message: Message, args: List[str]):
 
 
 async def process_top_cmd(message: Message):
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Для использования бота необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     top = await db.get_top(10)
     if not top:
         return await message.answer("Таблица лидеров пуста.", parse_mode="HTML")
@@ -1036,6 +1041,9 @@ async def process_top_cmd(message: Message):
 
 async def process_pay_cmd(message: Message, args: List[str]):
     sender = message.from_user
+    if not await check_subscription(sender.id):
+        return await message.answer("⚠️ <b>Для выполнения переводов необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     sender_data = await db.get_user(sender.id)
     sender_bal = sender_data[2] if sender_data else 0
 
@@ -1091,6 +1099,9 @@ async def process_pay_cmd(message: Message, args: List[str]):
 
 async def process_gram_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     gram_amount = 1.0
@@ -1122,7 +1133,7 @@ async def process_gram_cmd(message: Message, args: List[str]):
 
     builder = InlineKeyboardBuilder()
     builder.button(text=f"💎 Оплатить {gram_amount} GRAM", url=ton_link)
-    builder.button(text="✅ Я оплатил", callback_data=f"g_check_{invoice_id}")
+    builder.button(text="✅ Я оплатил", callback_data=f"g_check_{invoice_id}_{user_id}")
     builder.adjust(1)
 
     text = (
@@ -1138,6 +1149,9 @@ async def process_gram_cmd(message: Message, args: List[str]):
 
 async def process_withdraw_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
+    if not await check_subscription(user_id):
+        return await message.answer("⚠️ <b>Необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     if not args:
@@ -1229,6 +1243,9 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
 
 
 async def process_stars_cmd(message: Message, args: List[str]):
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     stars_amount = 15
     if args and args[0].isdigit():
         stars_amount = int(args[0])
@@ -1251,7 +1268,9 @@ async def process_broadcast_cmd(message: Message, args: List[str]):
     if not await db.is_admin(message.from_user.id):
         return
 
-    # Поддержка текста или пересланного сообщения
+    if not await check_subscription(message.from_user.id):
+        return await message.answer("⚠️ <b>Администраторам тоже необходимо подписаться на канал перед запуском рассылки!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
     broadcast_text = None
     if message.reply_to_message:
         broadcast_text = message.reply_to_message.text or message.reply_to_message.caption
@@ -1271,7 +1290,7 @@ async def process_broadcast_cmd(message: Message, args: List[str]):
         try:
             await bot.send_message(chat_id=u_id, text=broadcast_text, parse_mode="HTML")
             success += 1
-            await asyncio.sleep(0.04)  # Ограничение Telegram ~25-30 сообщений/сек
+            await asyncio.sleep(0.04)
         except Exception:
             blocked += 1
 
@@ -1328,6 +1347,8 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
         await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
         ref_count = await db.get_referrals_count(message.from_user.id)
@@ -1356,6 +1377,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, rest = await resolve_target_user(message, args)
         amount_raw = None
 
@@ -1382,6 +1406,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, rest = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Укажите игрока: <code>мут @username 10м Спам</code> или ответом на сообщение.", parse_mode="HTML")
@@ -1416,6 +1443,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Укажите пользователя: <code>размут @username</code> или ответом на сообщение.", parse_mode="HTML")
@@ -1444,6 +1474,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Использование: <code>бан @username</code> или ответом на сообщение.", parse_mode="HTML")
@@ -1461,6 +1494,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Использование: <code>разбан @username</code> или <code>разбан 12345678</code>", parse_mode="HTML")
@@ -1475,6 +1511,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Укажите игрока: <code>варн @username</code> или ответом на сообщение.", parse_mode="HTML")
@@ -1498,6 +1537,9 @@ async def handle_all_text_commands(message: Message):
         if not await db.is_admin(message.from_user.id):
             return
         
+        if not await check_subscription(message.from_user.id):
+            return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
         target_id, target_name, _ = await resolve_target_user(message, args)
         if not target_id:
             return await message.answer("❌ Укажите игрока: <code>разварн @username</code> или ответом на сообщение.", parse_mode="HTML")
@@ -1509,6 +1551,9 @@ async def handle_all_text_commands(message: Message):
 # ================= CALLBACKS =================
 @dp.callback_query(F.data.startswith("rep_"))
 async def cb_quick_replay(call: CallbackQuery):
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
     parts = call.data.split("_")
     if len(parts) < 4:
         return await call.answer("❌ Ошибка параметров!", show_alert=True)
@@ -1547,6 +1592,9 @@ async def cb_quick_replay(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("ac_"))
 async def cb_accept_duel(call: CallbackQuery):
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы принять вызов!", show_alert=True)
+
     duel_id = call.data.replace("ac_", "")
     if duel_id not in active_duels:
         return await call.answer("❌ Дуэль не найдена или уже завершилась!", show_alert=True)
@@ -1554,9 +1602,6 @@ async def cb_accept_duel(call: CallbackQuery):
     duel = active_duels[duel_id]
     if call.from_user.id != duel["opponent_id"]:
         return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на наш канал, чтобы принять вызов!", show_alert=True)
 
     if duel["status"] != "pending":
         return await call.answer("Дуэль уже началась!", show_alert=True)
@@ -1642,6 +1687,9 @@ async def cb_ladder_step(call: CallbackQuery):
     if call.from_user.id != user_id:
         return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
 
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
     if user_id not in active_ladders:
         return await call.answer("❌ Игра уже завершена!", show_alert=True)
 
@@ -1715,6 +1763,9 @@ async def cb_ladder_cash(call: CallbackQuery):
     if call.from_user.id != user_id:
         return await call.answer("❌ Это не ваша игра!", show_alert=True)
 
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
     if user_id not in active_ladders:
         return await call.answer("❌ Игра уже завершена!", show_alert=True)
 
@@ -1737,16 +1788,37 @@ async def cb_ladder_cash(call: CallbackQuery):
     await send_game_result(call.message, "win", res, user_id=user_id)
 
 
+# ================= ЗАЩИЩЕННЫЙ CALLBACK «Я ОПЛАТИЛ» =================
 @dp.callback_query(F.data.startswith("g_check_"))
 async def cb_gram_check(call: CallbackQuery):
-    inv_id = call.data.replace("g_check_", "")
+    raw_data = call.data.replace("g_check_", "")
+    parts = raw_data.split("_")
+    
+    if len(parts) < 2:
+        return await call.answer("❌ Ошибка формата заявки!", show_alert=True)
+    
+    inv_id = f"G_{parts[0]}" if not parts[0].startswith("G_") else parts[0]
+    expected_user_id = int(parts[1]) if parts[1].isdigit() else 0
+
+    # Защита от нажатия посторонними участниками чата
+    if call.from_user.id != expected_user_id:
+        return await call.answer("❌ Это не ваша заявка на оплату!", show_alert=True)
+
     async with db.pool.acquire() as conn:
         dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
         if not dep:
-            return await call.answer("❌ Заявка не найдена!", show_alert=True)
+            return await call.answer("❌ Заявка не найдена в базе!", show_alert=True)
+
+        if dep["user_id"] != call.from_user.id:
+            return await call.answer("❌ Вы не являетесь владельцем этой заявки!", show_alert=True)
 
         if dep["status"] == "completed":
-            return await call.answer("✅ Этот платеж уже зачислен!", show_alert=True)
+            return await call.answer("✅ Этот платеж уже зачислен на ваш баланс!", show_alert=True)
+        
+        if dep["status"] == "under_review":
+            return await call.answer("⏳ Платеж уже находится на проверке администрацией.", show_alert=True)
+
+        await conn.execute("UPDATE gram_deposits SET status = 'under_review' WHERE invoice_id = $1", inv_id)
 
     await call.answer("⏳ Запрос на проверку отправлен администраторам!", show_alert=True)
     await call.message.edit_text("⏳ <b>Платеж отправлен на проверку!</b> Монеты будут зачислены после подтверждения.", parse_mode="HTML")
@@ -1778,7 +1850,7 @@ async def cb_gram_approve(call: CallbackQuery):
     inv_id = call.data.replace("g_ok_", "")
     async with db.pool.acquire() as conn:
         dep = await conn.fetchrow("SELECT * FROM gram_deposits WHERE invoice_id = $1", inv_id)
-        if not dep or dep["status"] != "pending":
+        if not dep or dep["status"] == "completed":
             return await call.answer("❌ Заявка уже обработана!", show_alert=True)
 
         await conn.execute("UPDATE gram_deposits SET status = 'completed' WHERE invoice_id = $1", inv_id)
