@@ -19,7 +19,11 @@ from aiogram.types import (
     PreCheckoutQuery,
     LabeledPrice,
     BotCommand,
-    TelegramObject
+    TelegramObject,
+    ChatMemberOwner,
+    ChatMemberAdministrator,
+    ChatMemberMember,
+    ChatMemberRestricted
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -36,7 +40,14 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
+REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
+# Очищаем канал от ссылок https://t.me/
+if "t.me/" in REQUIRED_CHANNEL_RAW:
+    REQUIRED_CHANNEL_RAW = "@" + REQUIRED_CHANNEL_RAW.split("t.me/")[-1].strip("/")
+if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQUIRED_CHANNEL_RAW.startswith("-100"):
+    REQUIRED_CHANNEL_RAW = f"@{REQUIRED_CHANNEL_RAW}"
+
+REQUIRED_CHANNEL = REQUIRED_CHANNEL_RAW
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
@@ -162,30 +173,31 @@ def format_duration(seconds: int) -> str:
     return f"{seconds} сек."
 
 
-# ================= ПРОВЕРКА ПОДПИСКИ (ОБЯЗАТЕЛЬНА ДЛЯ ВСЕХ) =================
+# ================= НАДЕЖНАЯ ПРОВЕРКА ПОДПИСКИ =================
 async def check_subscription(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL in ["@твой_канал", "none", "", "None"]:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL.lower() in ["none", "null", "", "@none", "@null"]:
         return True
 
-    chat_target = REQUIRED_CHANNEL
-    if not chat_target.startswith("@") and not chat_target.startswith("-100") and not chat_target.startswith("-"):
-        chat_target = f"@{chat_target}"
-
     try:
-        member = await bot.get_chat_member(chat_id=chat_target, user_id=user_id)
-        status_val = str(member.status).lower().replace("chatmemberstatus.", "")
-        
-        if status_val in ["creator", "administrator", "member", "owner"]:
+        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        # Проверяем как через типы классов aiogram, так и через строковые статусы
+        if isinstance(member, (ChatMemberOwner, ChatMemberAdministrator, ChatMemberMember)):
             return True
-        if status_val == "restricted":
+        if isinstance(member, ChatMemberRestricted):
             return getattr(member, "is_member", False)
+        
+        # Запасная проверка через статус
+        st = str(getattr(member, "status", "")).lower()
+        if any(valid in st for valid in ["creator", "administrator", "member", "owner"]):
+            return True
+
         return False
     except Exception as e:
         err_msg = str(e).lower()
+        logging.error(f"⚠️ Ошибка проверки подписки пользователя {user_id} в {REQUIRED_CHANNEL}: {e}")
+        # Если чат не найден или бот не может получить доступ к участникам, пропускаем во избежание блокировки игроков
         if "chat not found" in err_msg or "bot is not a member" in err_msg or "member list is inaccessible" in err_msg:
-            logging.error(f"⚠️ Бот должен быть АДМИНИСТРАТОРОМ канала {chat_target}! Пропуск проверки.")
             return True
-        logging.warning(f"Ошибка проверки подписки {user_id}: {e}")
         return False
 
 
@@ -202,7 +214,10 @@ def sub_keyboard():
 @dp.callback_query(F.data == "sub_check_recheck")
 async def cb_recheck_sub(call: CallbackQuery):
     if await check_subscription(call.from_user.id):
-        await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все функции.", parse_mode="HTML")
+        try:
+            await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все функции и игры.", parse_mode="HTML")
+        except Exception:
+            await call.answer("✅ Подписка подтверждена!", show_alert=True)
     else:
         await call.answer("❌ Вы ещё не подписались на наш канал!", show_alert=True)
 
@@ -396,7 +411,8 @@ class ThrottlingMiddleware(BaseMiddleware):
             now = time.time()
             last = user_last_action.get(user_id, 0.0)
 
-            if now - last < 1.2:
+            # Ограничение частоты кликов
+            if now - last < 1.0:
                 if isinstance(event, CallbackQuery):
                     await event.answer("⏳ Не так быстро! Подождите секунду.", show_alert=False)
                 return
@@ -1800,7 +1816,6 @@ async def cb_gram_check(call: CallbackQuery):
     inv_id = f"G_{parts[0]}" if not parts[0].startswith("G_") else parts[0]
     expected_user_id = int(parts[1]) if parts[1].isdigit() else 0
 
-    # Защита от нажатия посторонними участниками чата
     if call.from_user.id != expected_user_id:
         return await call.answer("❌ Это не ваша заявка на оплату!", show_alert=True)
 
