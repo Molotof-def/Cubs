@@ -55,9 +55,9 @@ WEBHOOK_PATH = "/webhook"
 
 GRAM_WALLET = os.getenv("GRAM_WALLET", "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N")
 
-IMG_WIN = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.png"
-IMG_LOSS = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.png"
-IMG_DRAW = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/great-ball.png"
+IMG_WIN = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.jpg"
+IMG_LOSS = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.jpg"
+IMG_DRAW = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/draw.jpg"
 
 MOTIVATIONAL_QUOTES = [
     "🔥 <i>«Тот, кто никогда не падал, никогда не поднимался. Сделай паузу и верни своё!»</i>",
