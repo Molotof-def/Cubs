@@ -232,7 +232,6 @@ class Database:
                     warns INT DEFAULT 0,
                     has_deposited BOOLEAN DEFAULT FALSE,
                     last_stars_deposit TIMESTAMP DEFAULT NULL,
-                    is_private BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS withdraw_requests (
@@ -261,7 +260,6 @@ class Database:
                     PRIMARY KEY (chat_id, user_id)
                 );
             """)
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT FALSE;")
 
     async def register_user(self, user_id: int, username: str, tg_username: Optional[str] = None, referrer_id: Optional[int] = None, chat_id: Optional[int] = None):
         clean_tag = tg_username.replace("@", "").lower() if tg_username else None
@@ -281,10 +279,6 @@ class Database:
                     ON CONFLICT (chat_id, user_id) DO NOTHING
                 """, chat_id, user_id)
 
-    async def set_privacy(self, user_id: int, is_private: bool):
-        async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET is_private = $1 WHERE user_id = $2", is_private, user_id)
-
     async def get_user_id_by_username(self, tg_username: str):
         clean_tag = tg_username.replace("@", "").lower().strip()
         async with self.pool.acquire() as conn:
@@ -293,7 +287,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at, tg_username, is_private FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at, tg_username FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -705,10 +699,8 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
         f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число\n\n"
-        f"📊 <b>Статистика и настройки:</b>\n"
-        f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n"
-        f"🔒 <code>-профиль</code> — скрыть профиль от других\n"
-        f"🔓 <code>+профиль</code> — открыть профиль для всех\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n\n"
         f"💳 <b>Пополнение и Вывод:</b>\n"
         f"💎 <code>грам [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
         f"⭐ <code>звезды [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
@@ -955,7 +947,6 @@ async def process_duel_cmd(message: Message, args: List[str]):
 
 
 async def process_profile_cmd(message: Message, args: List[str]):
-    # Если аргументов больше 1 и это не тег/ID — это обычный текст, игнорируем
     if len(args) > 1:
         return
     
@@ -981,23 +972,14 @@ async def process_profile_cmd(message: Message, args: List[str]):
         else:
             return await message.answer("❌ Пользователь не найден в базе данных!", parse_mode="HTML")
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u, is_private = user
-
-    # Проверка приватности: чужие игроки не видят профиль
-    if is_private and view_user_id != req_user_id and not await db.is_admin(req_user_id):
-        return await message.answer(
-            f"🔒 <b>Профиль закрыт!</b>\n"
-            f"👤 Пользователь {get_mention(view_user_id, name)} скрыл свой профиль от посторонних глаз.",
-            parse_mode="HTML"
-        )
+    _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u = user
 
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
     dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
-    privacy_badge = " 🔒" if is_private else ""
 
     text = (
-        f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, name)}{privacy_badge}\n"
+        f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, name)}\n"
         f"┣ 🆔 <b>ID:</b> <code>{view_user_id}</code>\n"
         f"┣ 💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{fmt_num(turnover)} 💰</code>\n"
@@ -1247,16 +1229,7 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
-    # 1. Приватность профиля (строгие фразы)
-    if full_text in ["-профиль", "-profile", "скрыть профиль", "закрыть профиль"]:
-        await db.set_privacy(message.from_user.id, True)
-        return await message.answer("🔒 <b>Ваш профиль теперь скрыт!</b> Другие игроки не увидят ваш баланс и статистику.", parse_mode="HTML")
-
-    if full_text in ["+профиль", "+profile", "открыть профиль", "показать профиль"]:
-        await db.set_privacy(message.from_user.id, False)
-        return await message.answer("🔓 <b>Ваш профиль открыт!</b> Теперь все игроки могут просматривать вашу статистику.", parse_mode="HTML")
-
-    # 2. Статистика чата
+    # 1. Статистика чата
     if full_text in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"]:
         return await process_chat_stats_cmd(message)
 
@@ -1273,7 +1246,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
     
-    # Игры (убраны паразитные фразы "го", "гоу", "кубы" и т.д.)
+    # Игры (строгие команды, без го/гоу/кубы)
     elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
         await process_dice_cmd(message, args)
     elif cmd in ["doubledice", "2dice", "дабл", "дубль", "2кубика"]:
