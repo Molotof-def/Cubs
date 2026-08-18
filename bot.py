@@ -960,6 +960,11 @@ async def process_profile_cmd(message: Message, args: List[str]):
     
     view_user_id = target_id if target_id else req_user_id
 
+    # Проверка на вызов профиля самого бота
+    me = await bot.get_me()
+    if view_user_id == me.id:
+        return
+
     user = await db.get_user(view_user_id)
     if not user:
         if view_user_id == req_user_id:
@@ -970,11 +975,11 @@ async def process_profile_cmd(message: Message, args: List[str]):
 
     _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u, is_private = user
 
-    # Проверка настроек приватности
+    # Проверка приватности: чужие игроки не видят профиль
     if is_private and view_user_id != req_user_id and not await db.is_admin(req_user_id):
         return await message.answer(
-            f"🔒 <b>Профиль скрыт настройками приватности.</b>\n"
-            f"👤 Пользователь {get_mention(view_user_id, name)} закрыл свой профиль от посторонних глаз.",
+            f"🔒 <b>Профиль закрыт!</b>\n"
+            f"👤 Пользователь {get_mention(view_user_id, name)} скрыл свой профиль от посторонних глаз.",
             parse_mode="HTML"
         )
 
@@ -1234,7 +1239,7 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
-    # 1. Приватность профиля
+    # 1. Приватность профиля (строгие команды)
     if full_text in ["-профиль", "-profile", "скрыть профиль", "закрыть профиль"]:
         await db.set_privacy(message.from_user.id, True)
         return await message.answer("🔒 <b>Ваш профиль теперь скрыт!</b> Другие игроки не увидят ваш баланс и статистику.", parse_mode="HTML")
@@ -1278,7 +1283,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное", "н", "нч"]:
         await process_simple_bet(message, args, "odd")
     
-    # Личный кабинет (буква 'я' полностью исключена, чтобы не ломать переписку)
+    # Личный кабинет (строгая проверка: вызов только как отдельная команда)
     elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата", "монетки", "монеты", "счет", "счёт"]:
         await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "пригласить", "ссылка", "партнерка"]:
