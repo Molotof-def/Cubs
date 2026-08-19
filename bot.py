@@ -229,7 +229,7 @@ async def cb_recheck_sub(call: CallbackQuery):
         await call.answer("❌ Вы ещё не подписались на наш канал!", show_alert=True)
 
 
-# ================= БАЗА ДАННЫХ (POSTGRESQL) =================
+# ================= БАЗА ДАННЫХ С РАЗДЕЛЬНЫМИ БАЛАНСАМИ =================
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -247,6 +247,8 @@ class Database:
                     tg_username TEXT,
                     referrer_id BIGINT DEFAULT NULL,
                     balance BIGINT DEFAULT 0,
+                    balance_ton BIGINT DEFAULT 0,
+                    balance_stars BIGINT DEFAULT 0,
                     turnover BIGINT DEFAULT 0,
                     wins INT DEFAULT 0,
                     losses INT DEFAULT 0,
@@ -256,6 +258,11 @@ class Database:
                     last_stars_deposit TIMESTAMP DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                
+                -- Автомиграция для существующих БД
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_ton BIGINT DEFAULT 0;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_stars BIGINT DEFAULT 0;
+
                 CREATE TABLE IF NOT EXISTS withdraw_requests (
                     req_id TEXT PRIMARY KEY,
                     user_id BIGINT,
@@ -287,8 +294,8 @@ class Database:
         clean_tag = tg_username.replace("@", "").lower() if tg_username else None
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO users (user_id, username, tg_username, referrer_id, balance) 
-                VALUES ($1, $2, $3, $4, 0)
+                INSERT INTO users (user_id, username, tg_username, referrer_id, balance, balance_ton, balance_stars) 
+                VALUES ($1, $2, $3, $4, 0, 0, 0)
                 ON CONFLICT (user_id) DO UPDATE SET 
                     username = EXCLUDED.username,
                     tg_username = COALESCE(EXCLUDED.tg_username, users.tg_username)
@@ -314,14 +321,35 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at, tg_username FROM users WHERE user_id = $1",
+                "SELECT user_id, username, (balance_ton + balance_stars) as total_bal, turnover, wins, losses, draws, warns, referrer_id, has_deposited, last_stars_deposit, created_at, tg_username, balance_ton, balance_stars FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
 
-    async def change_balance(self, user_id: int, amount: int):
+    async def change_balance(self, user_id: int, amount: int, currency: str = "ton"):
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
+            if amount > 0:
+                col = "balance_ton" if currency == "ton" else "balance_stars"
+                await conn.execute(f"UPDATE users SET {col} = {col} + $1, balance = balance + $1 WHERE user_id = $2", amount, user_id)
+            else:
+                # Списание: сначала тратим stars, затем ton
+                spend = abs(amount)
+                user = await conn.fetchrow("SELECT balance_ton, balance_stars FROM users WHERE user_id = $1", user_id)
+                if not user:
+                    return
+                b_ton, b_stars = user["balance_ton"], user["balance_stars"]
+                
+                deduct_stars = min(b_stars, spend)
+                spend -= deduct_stars
+                deduct_ton = min(b_ton, spend)
+
+                await conn.execute("""
+                    UPDATE users SET 
+                        balance_stars = balance_stars - $1,
+                        balance_ton = balance_ton - $2,
+                        balance = balance - $3
+                    WHERE user_id = $4
+                """, deduct_stars, deduct_ton, abs(amount), user_id)
 
     async def add_turnover(self, user_id: int, amount: int):
         async with self.pool.acquire() as conn:
@@ -340,11 +368,11 @@ class Database:
                 ref_id = await conn.fetchval("SELECT referrer_id FROM users WHERE user_id = $1", loser_id)
                 if ref_id and ref_id != loser_id:
                     reward = max(1, int(lost_amount * 0.03))
-                    await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, ref_id)
+                    await conn.execute("UPDATE users SET balance_ton = balance_ton + $1, balance = balance + $1 WHERE user_id = $2", reward, ref_id)
                     try:
                         await bot.send_message(
                             chat_id=ref_id,
-                            text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал проиграл <code>{fmt_num(lost_amount)} 💰</code>. Вам начислено 3%: <b>+{fmt_num(reward)} 💰</b>",
+                            text=f"🤝 <b>Реферальный бонус!</b>\nВаш реферал сыграл на <code>{fmt_num(lost_amount)} 💰</code>. Вам начислено 3%: <b>+{fmt_num(reward)} 💰</b> (без холда)",
                             parse_mode="HTML"
                         )
                     except Exception:
@@ -358,14 +386,14 @@ class Database:
 
     async def get_top(self, limit=10):
         async with self.pool.acquire() as conn:
-            return await conn.fetch("SELECT username, balance FROM users ORDER BY balance DESC LIMIT $1", limit)
+            return await conn.fetch("SELECT username, (balance_ton + balance_stars) as balance FROM users ORDER BY balance DESC LIMIT $1", limit)
 
     async def get_chat_stats(self, chat_id: int):
         async with self.pool.acquire() as conn:
             stats = await conn.fetchrow("""
                 SELECT 
                     COUNT(u.user_id) as total_players,
-                    COALESCE(SUM(u.balance), 0) as total_balance,
+                    COALESCE(SUM(u.balance_ton + u.balance_stars), 0) as total_balance,
                     COALESCE(SUM(u.turnover), 0) as total_turnover,
                     COALESCE(SUM(u.wins), 0) as total_wins,
                     COALESCE(SUM(u.losses), 0) as total_losses
@@ -375,11 +403,11 @@ class Database:
             """, chat_id)
             
             top_player = await conn.fetchrow("""
-                SELECT u.user_id, u.username, u.balance
+                SELECT u.user_id, u.username, (u.balance_ton + u.balance_stars) as balance
                 FROM chat_members cm
                 JOIN users u ON cm.user_id = u.user_id
                 WHERE cm.chat_id = $1
-                ORDER BY u.balance DESC
+                ORDER BY balance DESC
                 LIMIT 1
             """, chat_id)
             
@@ -745,7 +773,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"📊 <b>Статистика:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n\n"
         f"💳 <b>Пополнение и Вывод:</b>\n"
-        f"💎 <code>грам [кол-во]</code> — пополнить через Gram / TON (без холда)\n"
+        f"💎 <code>грам [кол-во]</code> — пополнить через Gram / TON (<b>без холда</b>)\n"
         f"⭐ <code>звезды [кол-во]</code> — пополнить за Stars (холд 21д на вывод)\n"
         f"📤 <code>вывод [монеты]</code> — вывод в Stars (курс 10:1, от 1000 💰)\n"
         f"🤝 <code>реф</code> — реферальная ссылка (3%)\n"
@@ -1021,7 +1049,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         else:
             return await message.answer("❌ Пользователь не найден в базе данных!", parse_mode="HTML")
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u = user
+    _, name, total_balance, turnover, wins, losses, draws, warns, _, has_dep, last_stars, reg_date, tg_u, b_ton, b_stars = user
 
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
@@ -1030,7 +1058,9 @@ async def process_profile_cmd(message: Message, args: List[str]):
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, name)}\n"
         f"┣ 🆔 <b>ID:</b> <code>{view_user_id}</code>\n"
-        f"┣ 💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
+        f"┣ 💰 <b>Общий баланс:</b> <code>{fmt_num(total_balance)} 💰</code>\n"
+        f"┣ 💎 <b>TON-баланс (без холда):</b> <code>{fmt_num(b_ton)} 💰</code>\n"
+        f"┣ ⭐ <b>Stars-баланс (холд 21д):</b> <code>{fmt_num(b_stars)} 💰</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{fmt_num(turnover)} 💰</code>\n"
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
         f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
@@ -1110,7 +1140,7 @@ async def process_pay_cmd(message: Message, args: List[str]):
     await db.register_user(recipient_id, recipient_name)
 
     await db.change_balance(sender.id, -amount)
-    await db.change_balance(recipient_id, amount)
+    await db.change_balance(recipient_id, amount, currency="ton")
 
     await message.answer(
         f"💸 {get_mention(sender.id, sender.full_name)} перевел <b>{fmt_num(amount)} 💰</b> "
@@ -1160,7 +1190,7 @@ async def process_gram_cmd(message: Message, args: List[str]):
 
     text = (
         f"💎 <b>ПОПОЛНЕНИЕ ЧЕРЕЗ GRAM / TON</b>\n\n"
-        f"💰 Вы получите: <b>+{fmt_num(coins_amount)} монет</b> (без холда!)\n"
+        f"💰 Вы получите: <b>+{fmt_num(coins_amount)} монет</b> (<b>без холда на вывод!</b>)\n"
         f"💵 К оплате: <code>{gram_amount} GRAM</code> (или TON)\n\n"
         f"📍 <b>Адрес кошелька:</b>\n<code>{GRAM_WALLET}</code>\n\n"
         f"📝 <b>ОБЯЗАТЕЛЬНЫЙ комментарий (MEMO):</b>\n<code>{invoice_id}</code>\n\n"
@@ -1169,6 +1199,7 @@ async def process_gram_cmd(message: Message, args: List[str]):
     await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
+# ================= ВЫВОД С УЧЕТОМ ТОН И STARS =================
 async def process_withdraw_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
     if not await check_subscription(user_id):
@@ -1181,16 +1212,23 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             "⭐ <b>Вывод в Telegram Stars</b>\n\n"
             "Курс конвертации: <b>10 монет = 1 ⭐ Star</b>\n"
             "Минимум для вывода: <b>1000 💰 (= 100 ⭐)</b>\n\n"
-            "🔒 <b>Защита от Refund:</b> Вывод доступен спустя <b>21 день</b> после последнего пополнения через Stars (на пополнения через <code>грам</code> холд не действует).\n\n"
+            "💎 <b>TON / GRAM средства выводятся БЕЗ ХОЛДА в любой момент!</b>\n"
+            "⭐ На пополнения через Stars действует холд <b>21 день</b> (защита от Telegram Refund).\n\n"
             "Формат: <code>вывод [монеты/вабанк] [твой_тег]</code>\n"
             "<i>Пример:</i> <code>вывод 2000 @durov</code> (получите 200 ⭐)",
             parse_mode="HTML"
         )
 
     user = await db.get_user(user_id)
-    user_bal = user[2] if user else 0
+    if not user:
+        return await message.answer("❌ Пользователь не найден!", parse_mode="HTML")
 
-    amount = resolve_bet_amount(args[0], user_bal)
+    total_bal = user[2]
+    last_stars_dep = user[10]
+    b_ton = user[13]
+    b_stars = user[14]
+
+    amount = resolve_bet_amount(args[0], total_bal)
     if amount is None:
         return await message.answer("❌ Неверный формат суммы! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
 
@@ -1202,28 +1240,27 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             parse_mode="HTML"
         )
 
-    if user_bal < amount:
+    if total_bal < amount:
         return await message.answer(
-            f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{fmt_num(user_bal)} 💰</code>",
+            f"❌ <b>Недостаточно средств!</b>\nВаш баланс: <code>{fmt_num(total_bal)} 💰</code>",
             parse_mode="HTML"
         )
 
-    last_stars_dep = user[10]
-    created_at = user[11] or datetime.now()
-
-    check_date = last_stars_dep if last_stars_dep else created_at
-    days_passed = (datetime.now() - check_date).days
-
-    if days_passed < 21:
-        days_left = 21 - days_passed
-        reason = "последнего депозита Stars (защита от рефанда Telegram)" if last_stars_dep else "регистрации"
-        return await message.answer(
-            f"🔒 <b>Холд безопасности активен!</b>\n\n"
-            f"В связи с правилами Telegram Stars Refund вывод средств заморожен на 21 день с момента {reason}.\n\n"
-            f"⏳ Осталось дней холда: <b>{days_left} дн.</b>\n"
-            f"💡 <i>Пополняйте баланс через <code>грам</code> без каких-либо холдов и задержек!</i>",
-            parse_mode="HTML"
-        )
+    # Проверка холда ТОЛЬКО если вывод задевает баланс Stars
+    if amount > b_ton:
+        # Требуется часть из stars
+        if last_stars_dep:
+            days_passed = (datetime.now() - last_stars_dep).days
+            if days_passed < 21:
+                days_left = 21 - days_passed
+                return await message.answer(
+                    f"🔒 <b>Холд безопасности на часть баланса Stars!</b>\n\n"
+                    f"💎 Доступно к мгновенному выводу без холда (TON): <b>{fmt_num(b_ton)} 💰</b>\n"
+                    f"⭐ Заморожено на 21 день (Stars): <b>{fmt_num(b_stars)} 💰</b>\n\n"
+                    f"⏳ Осталось дней холда: <b>{days_left} дн.</b>\n"
+                    f"💡 <i>Вы можете прямо сейчас вывести до <code>{fmt_num(b_ton)} 💰</code> без ожидания!</i>",
+                    parse_mode="HTML"
+                )
 
     stars_to_receive = amount // 10
 
@@ -1420,7 +1457,7 @@ async def handle_all_text_commands(message: Message):
             return await message.answer("❌ Сумма должна быть числом!", parse_mode="HTML")
 
         await db.register_user(target_id, target_name)
-        await db.change_balance(target_id, amount)
+        await db.change_balance(target_id, amount, currency="ton")
         verb = "выдал" if amount >= 0 else "забрал"
         await message.answer(f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!", parse_mode="HTML")
 
@@ -1850,7 +1887,7 @@ async def cb_gram_check(call: CallbackQuery):
             f"💎 <b>НОВОЕ ПОПОЛНЕНИЕ GRAM/TON!</b>\n\n"
             f"👤 Игрок: {get_mention(dep['user_id'], call.from_user.full_name)} (ID: <code>{dep['user_id']}</code>)\n"
             f"💵 Сумма: <b>{dep['gram_amount']} GRAM</b>\n"
-            f"💰 К начислению: <b>{fmt_num(dep['coins_amount'])} 💰</b>\n"
+            f"💰 К начислению: <b>{fmt_num(dep['coins_amount'])} 💰</b> (без холда)\n"
             f"📝 Memo/Инвойс: <code>{inv_id}</code>"
         )
         try:
@@ -1876,13 +1913,13 @@ async def cb_gram_approve(call: CallbackQuery):
             return await call.answer("❌ Заявка уже обработана!", show_alert=True)
 
         await conn.execute("UPDATE gram_deposits SET status = 'completed' WHERE invoice_id = $1", inv_id)
-        await db.change_balance(dep["user_id"], int(dep["coins_amount"]))
+        await db.change_balance(dep["user_id"], int(dep["coins_amount"]), currency="ton")
         await conn.execute("UPDATE users SET has_deposited = TRUE WHERE user_id = $1", dep["user_id"])
 
     try:
         await bot.send_message(
             chat_id=dep["user_id"],
-            text=f"🎉 <b>Платеж GRAM подтвержден!</b>\n💰 Начислено: <b>+{fmt_num(dep['coins_amount'])} 💰</b> (без холда)",
+            text=f"🎉 <b>Платеж GRAM подтвержден!</b>\n💰 Начислено: <b>+{fmt_num(dep['coins_amount'])} 💰</b> (без холда на вывод)",
             parse_mode="HTML"
         )
     except Exception:
@@ -1950,12 +1987,12 @@ async def cb_withdraw_reject(call: CallbackQuery):
     req_id = call.data.replace("wd_no_", "")
 
     async with db.pool.acquire() as conn:
-        req = await conn.fetchrow("SELECT user_id, amount, details, status FROM withdraw_requests WHERE req_id = $1", req_id)
+        req = await conn.fetchrow("SELECT user_id, amount, status FROM withdraw_requests WHERE req_id = $1", req_id)
         if not req or req["status"] != "pending":
             return await call.answer("❌ Заявка уже обработана или не найдена!", show_alert=True)
 
         await conn.execute("UPDATE withdraw_requests SET status = 'rejected' WHERE req_id = $1", req_id)
-        await db.change_balance(req["user_id"], req["amount"])
+        await db.change_balance(req["user_id"], req["amount"], currency="ton")
 
     try:
         await bot.send_message(
@@ -1988,7 +2025,7 @@ async def process_successful_payment(message: Message):
     if payload.startswith("stars_deposit_"):
         coins = int(payload.replace("stars_deposit_", ""))
         await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-        await db.change_balance(message.from_user.id, coins)
+        await db.change_balance(message.from_user.id, coins, currency="stars")
         
         async with db.pool.acquire() as conn:
             await conn.execute(
@@ -2000,12 +2037,16 @@ async def process_successful_payment(message: Message):
             f"🎉 <b>Оплата успешна!</b>\n"
             f"⭐ Списано: <code>{message.successful_payment.total_amount} Stars</code>\n"
             f"💰 Зачислено: <b>+{fmt_num(coins)} монет</b>\n"
-            f"🔒 <i>Вывод доступен через 21 день (защита Telegram Stars Refund). Пополнения через <code>грам</code> выводятся без ожидания.</i>",
+            f"🔒 <i>На эту сумму действует холд 21 день (защита Telegram Stars Refund). Пополнения через <code>грам</code> выводятся без ожидания!</i>",
             parse_mode="HTML"
         )
 
 
 # ================= ЗАПУСК =================
+async def handle_ping(request):
+    return web.Response(text="Duel Cubes Bot is alive! 🎲", status=200)
+
+
 async def on_startup(bot: Bot):
     await db.init()
     
@@ -2041,13 +2082,9 @@ async def on_startup(bot: Bot):
         logging.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме.")
 
 
-async def handle_ping(request):
-    return web.Response(text="Duel Cubes Bot is alive! 🎲", status=200)
-
 def main():
     if RENDER_EXTERNAL_URL:
         app = web.Application()
-        # Добавляем маршрут для пинга, чтобы сервис не спал
         app.router.add_get("/", handle_ping)
         
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
