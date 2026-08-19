@@ -2041,9 +2041,15 @@ async def on_startup(bot: Bot):
         logging.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме.")
 
 
+async def handle_ping(request):
+    return web.Response(text="Duel Cubes Bot is alive! 🎲", status=200)
+
 def main():
     if RENDER_EXTERNAL_URL:
         app = web.Application()
+        # Добавляем маршрут для пинга, чтобы сервис не спал
+        app.router.add_get("/", handle_ping)
+        
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
