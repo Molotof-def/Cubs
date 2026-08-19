@@ -229,7 +229,7 @@ async def cb_recheck_sub(call: CallbackQuery):
         await call.answer("❌ Вы ещё не подписались на наш канал!", show_alert=True)
 
 
-# ================= БАЗА ДАННЫХ (POSTGRESQL С CHECK BALANCE >= 0) =================
+# ================= БАЗА ДАННЫХ =================
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -558,36 +558,39 @@ async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Option
 
 # ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ (3 МИНУТЫ) =================
 async def ladder_timeout_watcher(user_id: int, message_obj: Message):
-    await asyncio.sleep(180)  # 3 минуты
-    if user_id in active_ladders:
-        game = active_ladders[user_id]
-        step = game.get("step", 0)
-        bet = game.get("bet", 100)
-        del active_ladders[user_id]
+    try:
+        await asyncio.sleep(180)
+        if user_id in active_ladders:
+            game = active_ladders[user_id]
+            step = game.get("step", 0)
+            bet = game.get("bet", 100)
+            del active_ladders[user_id]
 
-        if step > 0:
-            mult = LADDER_STEPS[step]
-            win = int(bet * mult)
-            await db.change_balance(user_id, win)
-            await db.record_game(user_id, "win")
-            try:
-                await message_obj.answer(
-                    f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
-                    f"💰 Автоматически зафиксирован выигрыш на <b>Ступени {step}</b> (x{mult}): <b>+{fmt_num(win)} 💰</b>",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
-        else:
-            await db.change_balance(user_id, bet)
-            try:
-                await message_obj.answer(
-                    f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
-                    f"💰 Несыгранная ставка <b>{fmt_num(bet)} 💰</b> возвращена на ваш баланс.",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+            if step > 0:
+                mult = LADDER_STEPS[step]
+                win = int(bet * mult)
+                await db.change_balance(user_id, win)
+                await db.record_game(user_id, "win")
+                try:
+                    await message_obj.answer(
+                        f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
+                        f"💰 Автоматически зафиксирован выигрыш на <b>Ступени {step}</b> (x{mult}): <b>+{fmt_num(win)} 💰</b>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            else:
+                await db.change_balance(user_id, bet)
+                try:
+                    await message_obj.answer(
+                        f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
+                        f"💰 Несыгранная ставка <b>{fmt_num(bet)} 💰</b> возвращена на ваш баланс.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+    except asyncio.CancelledError:
+        pass
 
 
 async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
@@ -920,15 +923,15 @@ async def process_ladder_cmd(message: Message, args: List[str]):
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
 
+    timeout_task = asyncio.create_task(ladder_timeout_watcher(user_id, message))
+
     active_ladders[user_id] = {
         "user_id": user_id,
         "bet": bet,
         "step": 0,
-        "is_rolling": False
+        "is_rolling": False,
+        "task": timeout_task
     }
-
-    # Запуск авто-таймаута на 3 минуты
-    asyncio.create_task(ladder_timeout_watcher(user_id, message))
 
     is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
     text = (
@@ -1338,21 +1341,26 @@ async def process_stars_cmd(message: Message, args: List[str]):
     )
 
 
-async def process_broadcast_cmd(message: Message, args: List[str]):
+# ================= СТРОГАЯ КОМАНДА РАССЫЛКИ (ТОЛЬКО ЧЕРЕЗ СЛЭШ) =================
+@dp.message(F.text.startswith("/broadcast") | F.text.startswith("/рассылка"))
+async def cmd_broadcast_strict(message: Message):
     if not await db.is_admin(message.from_user.id):
         return
 
     if not await check_subscription(message.from_user.id):
-        return await message.answer("⚠️ <b>Администраторам тоже необходимо подписаться на канал перед запуском рассылки!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+        return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
+
+    parts = message.text.strip().split(maxsplit=1)
+    args_text = parts[1] if len(parts) > 1 else None
 
     broadcast_text = None
     if message.reply_to_message:
         broadcast_text = message.reply_to_message.text or message.reply_to_message.caption
-    elif args:
-        broadcast_text = " ".join(args)
+    elif args_text:
+        broadcast_text = args_text
 
     if not broadcast_text:
-        return await message.answer("❌ Формат: <code>рассылка [текст]</code> или ответом на сообщение.", parse_mode="HTML")
+        return await message.answer("❌ Формат: <code>/рассылка [текст]</code> или ответом на сообщение.", parse_mode="HTML")
 
     user_ids = await db.get_all_user_ids()
     status_msg = await message.answer(f"📢 Начинаю рассылку для <b>{len(user_ids)}</b> игроков...", parse_mode="HTML")
@@ -1376,7 +1384,7 @@ async def process_broadcast_cmd(message: Message, args: List[str]):
     )
 
 
-# ================= МАРШРУТИЗАТОР ВСЕХ КОМАНД =================
+# ================= МАРШРУТИЗАТОР ОСТАЛЬНЫХ ТЕКСТОВЫХ КОМАНД =================
 @dp.message(F.text)
 async def handle_all_text_commands(message: Message):
     full_text = message.text.strip().lower()
@@ -1445,8 +1453,6 @@ async def handle_all_text_commands(message: Message):
         await process_withdraw_cmd(message, args)
 
     # Админка
-    elif cmd in ["broadcast", "рассылка"]:
-        await process_broadcast_cmd(message, args)
     elif cmd in ["give", "выдать", "начислить", "сет"]:
         if not await db.is_admin(message.from_user.id):
             return
@@ -1622,7 +1628,7 @@ async def handle_all_text_commands(message: Message):
         await message.answer(f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.", parse_mode="HTML")
 
 
-# ================= CALLBACKС =================
+# ================= CALLBACKS =================
 @dp.callback_query(F.data.startswith("rep_"))
 async def cb_quick_replay(call: CallbackQuery):
     if not await check_subscription(call.from_user.id):
@@ -1781,6 +1787,8 @@ async def cb_ladder_step(call: CallbackQuery):
 
     if val in [1, 2]:
         bet = game["bet"]
+        if "task" in game and not game["task"].done():
+            game["task"].cancel()
         del active_ladders[user_id]
         try:
             await db.record_game(user_id, "loss")
@@ -1802,6 +1810,8 @@ async def cb_ladder_step(call: CallbackQuery):
 
     if step >= 5:
         win = int(game["bet"] * mult)
+        if "task" in game and not game["task"].done():
+            game["task"].cancel()
         del active_ladders[user_id]
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
@@ -1846,6 +1856,9 @@ async def cb_ladder_cash(call: CallbackQuery):
     game = active_ladders[user_id]
     mult = LADDER_STEPS[game["step"]]
     win = int(game["bet"] * mult)
+
+    if "task" in game and not game["task"].done():
+        game["task"].cancel()
 
     del active_ladders[user_id]
     await db.change_balance(user_id, win)
