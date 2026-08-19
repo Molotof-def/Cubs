@@ -229,7 +229,7 @@ async def cb_recheck_sub(call: CallbackQuery):
         await call.answer("❌ Вы ещё не подписались на наш канал!", show_alert=True)
 
 
-# ================= БАЗА ДАННЫХ (POSTGRESQL) =================
+# ================= БАЗА ДАННЫХ (POSTGRESQL С CHECK BALANCE >= 0) =================
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -246,7 +246,7 @@ class Database:
                     username TEXT,
                     tg_username TEXT,
                     referrer_id BIGINT DEFAULT NULL,
-                    balance BIGINT DEFAULT 0,
+                    balance BIGINT DEFAULT 0 CHECK (balance >= 0),
                     turnover BIGINT DEFAULT 0,
                     wins INT DEFAULT 0,
                     losses INT DEFAULT 0,
@@ -257,7 +257,6 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
-                -- Автомиграция колонки даты последнего депозита
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_deposit_date TIMESTAMP DEFAULT NULL;
 
                 CREATE TABLE IF NOT EXISTS withdraw_requests (
@@ -557,6 +556,40 @@ async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Option
     return None, "Пользователь", args
 
 
+# ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ (3 МИНУТЫ) =================
+async def ladder_timeout_watcher(user_id: int, message_obj: Message):
+    await asyncio.sleep(180)  # 3 минуты
+    if user_id in active_ladders:
+        game = active_ladders[user_id]
+        step = game.get("step", 0)
+        bet = game.get("bet", 100)
+        del active_ladders[user_id]
+
+        if step > 0:
+            mult = LADDER_STEPS[step]
+            win = int(bet * mult)
+            await db.change_balance(user_id, win)
+            await db.record_game(user_id, "win")
+            try:
+                await message_obj.answer(
+                    f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
+                    f"💰 Автоматически зафиксирован выигрыш на <b>Ступени {step}</b> (x{mult}): <b>+{fmt_num(win)} 💰</b>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        else:
+            await db.change_balance(user_id, bet)
+            try:
+                await message_obj.answer(
+                    f"⏰ <b>Время игры в Лесенку истекло (3 мин)!</b>\n"
+                    f"💰 Несыгранная ставка <b>{fmt_num(bet)} 💰</b> возвращена на ваш баланс.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+
 async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
     user = await db.get_user(user_id)
     user_bal = user[2] if user else 0
@@ -745,7 +778,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"⚔️ <code>дуэль [ставка] @username</code> — дуэль (ответом или по тегу)\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
         f"🎲🎲 <code>дабл [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
-        f"🚀 <code>лесенка [ставка/вабанк]</code> — Кубическая Лесенка (до x7.5)\n"
+        f"🚀 <code>лесенка [ставка/вабанк]</code> — Кубическая Лесенка (до x7.5, таймер 3 мин)\n"
         f"📈 <code>больше [ставка/вабанк]</code> — Больше (4, 5, 6)\n"
         f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
@@ -813,7 +846,7 @@ async def process_dice_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return
+        return await message.answer("❌ <b>Укажите корректную ставку!</b>\nФормат: <code>кубик 500</code> или <code>кубик вабанк</code>", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -833,7 +866,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return
+        return await message.answer("❌ <b>Укажите корректную ставку!</b>\nФормат: <code>дабл 500</code> или <code>дабл вабанк</code>", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -853,7 +886,7 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return
+        return await message.answer("❌ <b>Укажите корректную ставку!</b>\nФормат: <code>больше 500</code> или <code>больше вабанк</code>", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -876,7 +909,7 @@ async def process_ladder_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return
+        return await message.answer("❌ <b>Укажите корректную ставку!</b>\nФормат: <code>лесенка 500</code> или <code>лесенка вабанк</code>", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка в Лесенке: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
@@ -894,12 +927,16 @@ async def process_ladder_cmd(message: Message, args: List[str]):
         "is_rolling": False
     }
 
+    # Запуск авто-таймаута на 3 минуты
+    asyncio.create_task(ladder_timeout_watcher(user_id, message))
+
     is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
     text = (
         f"🚀 <b>КУБИЧЕСКАЯ ЛЕСЕНКА</b>\n\n"
         f"{is_allin}"
         f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)}\n"
-        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b>\n\n"
+        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b>\n"
+        f"⏱ <i>Таймаут неактивности: 3 минуты</i>\n\n"
         f"{render_ladder(0)}\n\n"
         f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и сгорание ставки!</i>"
     )
@@ -953,7 +990,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(bet_raw, c_bal)
     if bet is None:
-        return await message.answer("❌ Неверный формат ставки! Укажите число или <code>вабанк</code>.", parse_mode="HTML")
+        return await message.answer("❌ Неверный формат ставки! Укажите число от 100 или <code>вабанк</code>.", parse_mode="HTML")
 
     if bet < 100:
         return await message.answer(f"❌ Минимальная ставка для дуэли: <b>100 💰</b>! У вас: <code>{fmt_num(c_bal)} 💰</code>", parse_mode="HTML")
@@ -1035,7 +1072,6 @@ async def process_profile_cmd(message: Message, args: List[str]):
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
     dep_status = "⭐ Депозитор" if has_dep else "⏳ Без депозита"
 
-    # Расчет статуса холда
     check_date = last_dep if last_dep else reg_date
     days_passed = (datetime.now() - check_date).days if check_date else 21
     days_left = max(0, 21 - days_passed)
@@ -1228,7 +1264,6 @@ async def process_withdraw_cmd(message: Message, args: List[str]):
             parse_mode="HTML"
         )
 
-    # Проверка 21 дня от последнего депозита или регистрации
     check_date = last_dep if last_dep else created_at
     days_passed = (datetime.now() - check_date).days
 
