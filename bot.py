@@ -41,7 +41,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
-REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@chat_giveaways").strip()
+REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 if "t.me/" in REQUIRED_CHANNEL_RAW:
     REQUIRED_CHANNEL_RAW = "@" + REQUIRED_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQUIRED_CHANNEL_RAW.startswith("-100"):
@@ -49,8 +49,8 @@ if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQ
 
 REQUIRED_CHANNEL = REQUIRED_CHANNEL_RAW
 
-# Канал спонсора для бонуса
-SPONSOR_CHANNEL_RAW = os.getenv("SPONSOR_CHANNEL", "@DuelCubesChannel").strip()
+# Канал спонсора
+SPONSOR_CHANNEL_RAW = os.getenv("SPONSOR_CHANNEL", "@chat_giveaways").strip()
 if "t.me/" in SPONSOR_CHANNEL_RAW:
     SPONSOR_CHANNEL_RAW = "@" + SPONSOR_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if SPONSOR_CHANNEL_RAW and not SPONSOR_CHANNEL_RAW.startswith("@") and not SPONSOR_CHANNEL_RAW.startswith("-100"):
@@ -109,7 +109,6 @@ chat_recent_users: Dict[int, List[int]] = {}
 user_loss_streaks: Dict[int, int] = {}
 user_last_action: Dict[int, float] = {}
 resolved_channel_id: Optional[int] = None
-resolved_sponsor_id: Optional[int] = None
 
 
 def fmt_num(val: int) -> str:
@@ -910,7 +909,7 @@ async def process_sponsor_cmd(message: Message):
     if not user:
         return
 
-    claimed = user[10]  # sponsor_bonus_claimed
+    claimed = user[10]
     if claimed:
         return await message.reply("✅ <b>Вы уже получали бонус за подписку на спонсора (+50 000 💰)!</b>", parse_mode="HTML")
 
@@ -965,7 +964,7 @@ async def process_work_cmd(message: Message):
     if not user:
         return
 
-    last_work = user[9]  # last_work_time
+    last_work = user[9]
     now = datetime.now()
 
     if not last_work:
@@ -973,7 +972,6 @@ async def process_work_cmd(message: Message):
     else:
         diff_seconds = (now - last_work).total_seconds()
 
-    # Минимальный интервал — 10 минут
     if diff_seconds < 600:
         remaining = int(600 - diff_seconds)
         mins = remaining // 60
@@ -992,7 +990,6 @@ async def process_work_cmd(message: Message):
     raw_earned = int(base_per_hour * hours) + random.randint(2000, 8000)
     raw_earned = max(5000, min(raw_earned, 380000))
 
-    # Проверка тега в нике (+10%)
     has_tag = has_cubes_tag(message.from_user.full_name)
     tag_bonus_text = ""
     if has_tag:
@@ -1029,6 +1026,7 @@ async def process_fact_cmd(message: Message):
     await message.reply(text, parse_mode="HTML")
 
 
+# ================= ГЛАВНОЕ МЕНЮ С СКЛАДЫВАЮЩИМИСЯ РЕЖИМАМИ (КАК НА ФОТО) =================
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -1045,23 +1043,24 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{fmt_num(balance)} монет</b>\n\n"
         f"💼 <b>Заработок монет:</b>\n"
-        f"🛠 <code>ворк</code> / <code>/work</code> — накопительный доход (до 24 часов)\n"
-        f"📢 <code>бонус спонсора</code> — разовые <b>+50 000 💰</b> за канал\n"
-        f"🏷 Добавь «Cubes» в ник Telegram $\\to$ <b>+10% к каждому ворку</b>\n\n"
+        f"🛠 <code>ворк</code> / <code>/work</code> — накопительный доход (до 24ч)\n"
+        f"📢 <code>бонус спонсора</code> — разовые <b>+50 000 💰</b>\n"
+        f"🏷 Добавь «Cubes» в ник $\\to$ <b>+10% к ворку</b>\n\n"
         f"📜 <b>Режимы игр:</b>\n"
-        f"🎁 <code>чек [сумма] [кол-во]</code> — создать раздачу чека в чате\n"
-        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1 с игроком\n"
+        f"<blockquote expandable>"
+        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека в чате\n"
+        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль с игроком\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
         f"🎲🎲 <code>дабл [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
-        f"🚀 <code>лесенка [ставка/вабанк]</code> — Кубическая Лесенка (до x7.5)\n"
+        f"🚀 <code>лесенка [ставка/вабанк]</code> — Лесенка (до x7.5)\n"
         f"📈 <code>больше [ставка/вабанк]</code> — Больше (4, 5, 6)\n"
         f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
-        f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число\n\n"
-        f"📊 <b>Статистика и другое:</b>\n"
+        f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число"
+        f"</blockquote>\n\n"
+        f"📊 <b>Статистика:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n"
-        f"💡 <code>факт дня</code> — интересные факты о Telegram\n"
-        f"🤝 <code>реф</code> — рефералка (3% от ставок друзей)\n"
+        f"🤝 <code>реф</code> — рефералка (3% от ставок)\n"
         f"💸 <code>перевод [сумма] @username</code> — передать монеты"
     )
     await message.reply(text, parse_mode="HTML")
