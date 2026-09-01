@@ -33,8 +33,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     exit("❌ ОШИБКА: Токен бота не найден в переменных окружения (BOT_TOKEN)!")
 
-OWNER_ID_RAW = os.getenv("OWNER_ID", "0")
-OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else 0
+OWNER_ID_RAW = os.getenv("OWNER_ID", "0").strip()
+try:
+    OWNER_ID = int(OWNER_ID_RAW)
+except ValueError:
+    OWNER_ID = 0
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -71,7 +74,7 @@ WORK_TASKS = [
     "продал редкий 3D-ассет на маркетплейсе",
     "починил серверную стойку дата-центра",
     "провёл успешный стрим и собрал кучу донатов",
-    "собрал мощный кастомный игровой ПК под заказ"
+    "собрал кастомный игровой ПК под заказ"
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -258,10 +261,12 @@ class Database:
                     draws INT DEFAULT 0,
                     warns INT DEFAULT 0,
                     last_work_time TIMESTAMP DEFAULT NULL,
+                    work_streak INT DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_work_time TIMESTAMP DEFAULT NULL;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS work_streak INT DEFAULT 0;
 
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     user_id BIGINT PRIMARY KEY
@@ -304,7 +309,7 @@ class Database:
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, last_work_time, created_at, tg_username FROM users WHERE user_id = $1",
+                "SELECT user_id, username, balance, turnover, wins, losses, draws, warns, referrer_id, last_work_time, work_streak, created_at, tg_username FROM users WHERE user_id = $1",
                 user_id
             )
             return list(row) if row else None
@@ -313,9 +318,9 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
-    async def update_work_time(self, user_id: int):
+    async def update_work_stats(self, user_id: int, new_streak: int):
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET last_work_time = CURRENT_TIMESTAMP WHERE user_id = $1", user_id)
+            await conn.execute("UPDATE users SET last_work_time = CURRENT_TIMESTAMP, work_streak = $1 WHERE user_id = $2", new_streak, user_id)
 
     async def add_turnover(self, user_id: int, amount: int):
         async with self.pool.acquire() as conn:
@@ -380,7 +385,7 @@ class Database:
             return stats, top_player
 
     async def is_admin(self, user_id: int) -> bool:
-        if user_id == OWNER_ID:
+        if OWNER_ID and user_id == OWNER_ID:
             return True
         async with self.pool.acquire() as conn:
             res = await conn.fetchval("SELECT 1 FROM bot_admins WHERE user_id = $1", user_id)
@@ -389,6 +394,10 @@ class Database:
     async def add_admin(self, user_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute("INSERT INTO bot_admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+
+    async def remove_admin(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM bot_admins WHERE user_id = $1", user_id)
 
     async def add_warn(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
@@ -569,7 +578,7 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
     user_bal = user[2] if user else 0
 
     if user_bal < bet:
-        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>/work</code> чтобы заработать!", parse_mode="HTML")
+        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -629,7 +638,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
     user_bal = user[2] if user else 0
 
     if user_bal < bet:
-        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>/work</code> чтобы заработать!", parse_mode="HTML")
+        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -686,7 +695,7 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
     user_bal = user[2] if user else 0
 
     if user_bal < bet:
-        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>/work</code> чтобы заработать!", parse_mode="HTML")
+        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -733,7 +742,7 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
         await send_game_result(message, "loss", res, user_id=user_id, game_type=game_type, bet=bet)
 
 
-# ================= КОМАНДА РАБОТЫ (/WORK) =================
+# ================= СИСТЕМА РАБОТЫ (РАЗ В 1 ЧАС С ПРОГРЕССИЕЙ X1, X2, X3...) =================
 async def process_work_cmd(message: Message):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
@@ -746,30 +755,41 @@ async def process_work_cmd(message: Message):
         return
 
     last_work = user[9]  # last_work_time
+    current_streak = user[10] or 0  # work_streak
     now = datetime.now()
 
     if last_work:
         diff_seconds = (now - last_work).total_seconds()
-        cooldown = 600  # 10 минут
+        cooldown = 3600  # 1 час ровно
         if diff_seconds < cooldown:
             remaining = int(cooldown - diff_seconds)
             mins = remaining // 60
             secs = remaining % 60
             return await message.answer(
-                f"⏳ {get_mention(user_id, message.from_user.full_name)}, вы устали!\n"
-                f"Отдохните ещё <b>{mins} мин. {secs} сек.</b> перед следующей работой.",
+                f"⏳ {get_mention(user_id, message.from_user.full_name)}, смена окончена!\n"
+                f"Следующая работа доступна через <b>{mins} мин. {secs} сек.</b>\n\n"
+                f"🔥 Ваш текущий стаж: <b>x{max(1, current_streak)}</b> к выплате.",
                 parse_mode="HTML"
             )
+        
+        # Если прошло больше 24 часов — серия сбрасывается
+        if diff_seconds > 86400:
+            current_streak = 0
 
-    reward = random.randint(10000, 100000)
+    new_streak = current_streak + 1
+    base_reward = random.randint(10000, 100000)
+    total_reward = base_reward * new_streak
     task = random.choice(WORK_TASKS)
 
-    await db.change_balance(user_id, reward)
-    await db.update_work_time(user_id)
+    await db.change_balance(user_id, total_reward)
+    await db.update_work_stats(user_id, new_streak)
 
     await message.answer(
-        f"💼 {get_mention(user_id, message.from_user.full_name)} {task} и заработал:\n"
-        f"💰 <b>+{fmt_num(reward)} монет!</b>",
+        f"💼 {get_mention(user_id, message.from_user.full_name)} {task}!\n\n"
+        f"💵 Базовая ставка: <code>{fmt_num(base_reward)} 💰</code>\n"
+        f"⚡️ Множитель стажа: <b>x{new_streak}</b>\n"
+        f"💰 <b>Итого начислено: +{fmt_num(total_reward)} монет!</b>\n\n"
+        f"⏰ <i>Следующая смена через 1 час с множителем x{new_streak + 1}!</i>",
         parse_mode="HTML"
     )
 
@@ -790,7 +810,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
         f"💰 Баланс: <b>{fmt_num(balance)} монет</b>\n\n"
         f"💼 <b>Заработок монет:</b>\n"
-        f"🛠 <code>/work</code> (или <code>работа</code>) — получить от 10 000 до 100 000 монет (раз в 10 минут)\n\n"
+        f"🛠 <code>ворк</code> / <code>/work</code> — работа раз в 1 час (с каждым часом множитель растет: x1, x2, x3...)\n\n"
         f"📜 <b>Режимы игр:</b>\n"
         f"⚔️ <code>дуэль [ставка] @username</code> — дуэль с игроком\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
@@ -928,7 +948,7 @@ async def process_ladder_cmd(message: Message, args: List[str]):
         return await message.answer(f"❌ Минимальная ставка в Лесенке: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>", parse_mode="HTML")
 
     if user_bal < bet:
-        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>/work</code> чтобы заработать!", parse_mode="HTML")
+        return await message.answer(f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!", parse_mode="HTML")
 
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
@@ -1079,7 +1099,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         else:
             return await message.answer("❌ Пользователь не найден в базе данных!", parse_mode="HTML")
 
-    _, name, balance, turnover, wins, losses, draws, warns, _, last_work, reg_date, tg_u = user
+    _, name, balance, turnover, wins, losses, draws, warns, _, last_work, streak, reg_date, tg_u = user
 
     total_games = wins + losses + draws
     winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
@@ -1088,6 +1108,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, name)}\n"
         f"┣ 🆔 <b>ID:</b> <code>{view_user_id}</code>\n"
         f"┣ 💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
+        f"┣ 💼 <b>Множитель ворка:</b> <code>x{max(1, streak or 1)}</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{fmt_num(turnover)} 💰</code>\n"
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
         f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
@@ -1179,7 +1200,7 @@ async def process_pay_cmd(message: Message, args: List[str]):
 @dp.message(F.text.startswith("/broadcast") | F.text.startswith("/рассылка"))
 async def cmd_broadcast_strict(message: Message):
     if not await db.is_admin(message.from_user.id):
-        return
+        return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
 
     if not await check_subscription(message.from_user.id):
         return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1233,13 +1254,13 @@ async def handle_all_text_commands(message: Message):
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
 
-    # Старт
-    if cmd in ["start", "старт", "меню", "menu", "помощь", "help", "инфо"]:
+    # Старт и кубы
+    if cmd in ["start", "старт", "кубы", "куби", "кубсы", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
 
-    # Работа / Заработок
-    elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "бонус"]:
+    # Работа / Заработок (ворк)
+    elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "смена"]:
         await process_work_cmd(message)
 
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
@@ -1274,7 +1295,7 @@ async def handle_all_text_commands(message: Message):
         ref_count = await db.get_referrals_count(message.from_user.id)
         text_ref = (
             f"🤝 <b>Реферальная программа</b>\n\n"
-            f"Приглашай друзей и получай <b>3% от каждого их проигрыша</b> во всех режимах кубиков!\n\n"
+            f"Приглашай друзей и получай <b>3% от каждой их ставки</b> во всех режимах кубиков!\n\n"
             f"👥 Твоих рефералов: <b>{ref_count}</b>\n"
             f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
         )
@@ -1287,7 +1308,7 @@ async def handle_all_text_commands(message: Message):
     # Админка
     elif cmd in ["give", "выдать", "начислить", "сет"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1302,7 +1323,7 @@ async def handle_all_text_commands(message: Message):
             target_id, target_name, _ = await resolve_target_user(message, args[1:])
 
         if not target_id or not amount_raw:
-            return await message.answer("❌ Формат: <code>выдать 1000 @username</code> или ответом на сообщение.", parse_mode="HTML")
+            return await message.answer("❌ Формат: <code>/give 1000 @username</code> или <code>выдать 1000 @username</code>.", parse_mode="HTML")
 
         try:
             amount = int(amount_raw)
@@ -1314,9 +1335,27 @@ async def handle_all_text_commands(message: Message):
         verb = "выдал" if amount >= 0 else "забрал"
         await message.answer(f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!", parse_mode="HTML")
 
+    elif cmd in ["setadmin", "админ", "датьадмина"]:
+        if message.from_user.id != OWNER_ID:
+            return await message.answer("❌ Только создатель бота может назначать администраторов!", parse_mode="HTML")
+        target_id, target_name, _ = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите игрока: <code>/setadmin @username</code>", parse_mode="HTML")
+        await db.add_admin(target_id)
+        await message.answer(f"👑 {get_mention(target_id, target_name)} назначен администратором бота!", parse_mode="HTML")
+
+    elif cmd in ["deladmin", "снятадмина"]:
+        if message.from_user.id != OWNER_ID:
+            return await message.answer("❌ Только создатель бота может снимать администраторов!", parse_mode="HTML")
+        target_id, target_name, _ = await resolve_target_user(message, args)
+        if not target_id:
+            return await message.answer("❌ Укажите игрока: <code>/deladmin @username</code>", parse_mode="HTML")
+        await db.remove_admin(target_id)
+        await message.answer(f"🚫 {get_mention(target_id, target_name)} снят с поста администратора.", parse_mode="HTML")
+
     elif cmd in ["mute", "мут", "завалить", "замутить"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1353,7 +1392,7 @@ async def handle_all_text_commands(message: Message):
 
     elif cmd in ["unmute", "размут", "снятьмут"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1384,7 +1423,7 @@ async def handle_all_text_commands(message: Message):
 
     elif cmd in ["ban", "бан", "забанить", "кик", "kick"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1404,7 +1443,7 @@ async def handle_all_text_commands(message: Message):
 
     elif cmd in ["unban", "разбан", "снятьбан"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1421,7 +1460,7 @@ async def handle_all_text_commands(message: Message):
 
     elif cmd in ["warn", "варн", "пред", "предупреждение"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1447,7 +1486,7 @@ async def handle_all_text_commands(message: Message):
 
     elif cmd in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
         if not await db.is_admin(message.from_user.id):
-            return
+            return await message.answer("❌ У вас нет прав администратора!", parse_mode="HTML")
         
         if not await check_subscription(message.from_user.id):
             return await message.answer("⚠️ <b>Администраторам также необходимо подписаться на канал!</b>", reply_markup=sub_keyboard(), parse_mode="HTML")
@@ -1489,7 +1528,7 @@ async def cb_quick_replay(call: CallbackQuery):
     user_bal = user[2] if user else 0
 
     if user_bal < 100:
-        return await call.answer(f"❌ Недостаточно монет! Баланс: {fmt_num(user_bal)} 💰\nНапишите /work!", show_alert=True)
+        return await call.answer(f"❌ Недостаточно монет! Баланс: {fmt_num(user_bal)} 💰\nНапишите ворк!", show_alert=True)
 
     actual_bet = min(bet, user_bal)
     await call.answer()
@@ -1717,7 +1756,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="work", description="Заработать 10k-100k монет 💼"),
+        BotCommand(command="work", description="Работа раз в 1 час (x1, x2, x3...) 💼"),
         BotCommand(command="dice", description="Кубик против бота 🤖"),
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
