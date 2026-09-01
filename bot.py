@@ -75,6 +75,19 @@ WORK_TASKS = [
     "собрал кастомный игровой ПК под заказ"
 ]
 
+TG_FACTS = [
+    "Первый клиент Telegram был запущен 14 августа 2013 года исключительно для устройств на iOS.",
+    "Протокол безопасности MTProto, на котором работает весь Telegram, был полностью спроектирован Николаем Дуровым — братом Павла Дурова и кандидатом физико-математических наук.",
+    "Идея создания защищенного мессенджера пришла Павлу Дурову, когда к нему в дверь стучался спецназ, а у него не было безопасного канала связи даже для звонка брату.",
+    "Telegram Bot API был запущен в июне 2015 года и стал первым в мире массовым стандартом для создания ботов внутри мессенджеров.",
+    "Telegram стал первым мессенджером, который ввел векторные анимированные стикеры в формате .TGS (на базе Lottie), которые весят в среднем менее 30 КБ.",
+    "Все анимированные эмодзи в Telegram с играми (🎲 кубик, 🎯 дартс, 🎰 слоты, 🏀 баскетбол) имеют встроенный детерминированный генератор случайных чисел на серверах Telegram.",
+    "Самый дорогой юзернейм в истории платформы Fragment — <b>@news</b>, он был продан на аукционе за 994 000 TON (~2.4 миллиона долларов на момент сделки).",
+    "Telegram официально не потратил ни одного доллара на платную рекламу самого приложения за всю историю своего существования — весь миллиардный рост произошёл благодаря вирусному эффекту.",
+    "В Telegram можно отправлять файлы объемом до 2 ГБ бесплатно и до 4 ГБ с подпиской Telegram Premium — это крупнейший лимит среди всех популярных мессенджеров мира.",
+    "Серверная инфраструктура Telegram распределена по независимым дата-центрам в разных точках планеты, а ключи шифрования разделены на части и никогда не хранятся в одном месте."
+]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -546,7 +559,7 @@ async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Option
     return None, "Пользователь", args
 
 
-# ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ (3 МИНУТЫ) =================
+# ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ =================
 async def ladder_timeout_watcher(user_id: int, message_obj: Message):
     try:
         await asyncio.sleep(180)
@@ -803,6 +816,16 @@ async def process_work_cmd(message: Message):
     )
 
 
+# ================= КОМАНДА «ФАКТ ДНЯ» =================
+async def process_fact_cmd(message: Message):
+    fact = random.choice(TG_FACTS)
+    text = (
+        f"💡 <b>ИНТЕРЕСНЫЙ ФАКТ О TELEGRAM:</b>\n\n"
+        f"<i>«{fact}»</i>"
+    )
+    await message.reply(text, parse_mode="HTML")
+
+
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -829,8 +852,9 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
         f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число\n\n"
-        f"📊 <b>Статистика:</b>\n"
+        f"📊 <b>Статистика и другое:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n"
+        f"💡 <code>факт дня</code> — интересные факты о Telegram\n"
         f"🤝 <code>реф</code> — рефералка (3% от ставок друзей)\n"
         f"💸 <code>перевод [сумма] @username</code> — передать монеты"
     )
@@ -1255,15 +1279,19 @@ async def handle_all_text_commands(message: Message):
     if not full_text:
         return
 
+    # Фразовые команды
     if full_text in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"]:
         return await process_chat_stats_cmd(message)
+
+    if full_text in ["факт дня", "факт_дня", "фактдня", "факты"]:
+        return await process_fact_cmd(message)
 
     parts = message.text.strip().split()
     cmd_raw = parts[0].lower()
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
 
-    # Старт и кубы (ответом)
+    # Старт и кубы
     if cmd in ["start", "старт", "кубы", "куби", "кубсы", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
@@ -1271,6 +1299,10 @@ async def handle_all_text_commands(message: Message):
     # Работа / Заработок (ворк)
     elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "смена"]:
         await process_work_cmd(message)
+
+    # Факт
+    elif cmd in ["fact", "факт"]:
+        await process_fact_cmd(message)
 
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
         await process_chat_stats_cmd(message)
@@ -1293,7 +1325,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
         await process_simple_bet(message, args, "odd")
     
-    # Личный кабинет (ответом)
+    # Личный кабинет
     elif cmd in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
         await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
@@ -1775,6 +1807,7 @@ async def on_startup(bot: Bot):
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
         BotCommand(command="work", description="Работа раз в 1 час (x1, x2, x3...) 💼"),
+        BotCommand(command="fact", description="Интересный факт о Telegram 💡"),
         BotCommand(command="dice", description="Кубик против бота 🤖"),
         BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
