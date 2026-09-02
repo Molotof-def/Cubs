@@ -125,7 +125,7 @@ async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
         await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Ошибка HTML-парсера ({e}), отправка обычным текстом...")
+        logging.warning(f"Ошибка HTML-парсера ({e}), отправка текстом без тегов...")
         clean_text = re.sub(r'<[^>]+>', '', text)
         await message.reply(text=clean_text, reply_markup=reply_markup)
 
@@ -464,7 +464,6 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET warns = 0 WHERE user_id = $1", user_id)
 
-    # Работа с дуэлями в БД
     async def create_duel(self, duel_id: str, chat_id: int, challenger_id: int, challenger_name: str, opponent_id: int, opponent_name: str, bet: int, comment: str):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -488,7 +487,7 @@ class Database:
 db = Database(DATABASE_URL)
 
 
-# ================= АНТИСПАМ, АВТО-МОДЕРАЦИЯ И РЕГИСТРАЦИЯ =================
+# ================= АНТИСПАМ И МОДЕРАЦИЯ =================
 class ThrottlingAndModerationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
@@ -765,10 +764,7 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
     if p_val > b_val:
         win = int(bet * 1.9)
         await db.change_balance(user_id, win)
-        try:
-            await db.record_game(user_id, "win")
-        except Exception:
-            pass
+        await db.record_game(user_id, "win")
         text = (
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
             f"👤 {get_mention(user_id, user_name)}\n"
@@ -777,11 +773,8 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         )
         await send_game_result(message, "win", text, user_id=user_id, game_type="dice", bet=bet)
     elif p_val < b_val:
-        try:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
-        except Exception as e:
-            logging.error(f"Ошибка фиксации поражения: {e}")
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
         text = (
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
             f"👤 {get_mention(user_id, user_name)}\n"
@@ -790,12 +783,10 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         await send_game_result(message, "loss", text, user_id=user_id, game_type="dice", bet=bet)
     else:
         await db.change_balance(user_id, bet)
-        try:
-            await db.record_game(user_id, "draw")
-        except Exception:
-            pass
+        await db.record_game(user_id, "draw")
         text = (
             f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
+            f"👤 {get_mention(user_id, user_name)}\n"
             f"💰 <b>Возврат ставки:</b> <code>+{fmt_num(bet)} 💰</code>"
         )
         await send_game_result(message, "draw", text, user_id=user_id, game_type="dice", bet=bet)
@@ -832,30 +823,36 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
         win = int(bet * mult)
 
         await db.change_balance(user_id, win)
-        try:
-            await db.record_game(user_id, "win")
-        except Exception:
-            pass
+        await db.record_game(user_id, "win")
 
         bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
-        res = f"👤 {get_mention(user_id, user_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n{bonus_title}💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
+        res = (
+            f"👤 {get_mention(user_id, user_name)}\n"
+            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
+            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
+            f"{bonus_title}💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
+        )
         await send_game_result(message, "win", res, user_id=user_id, game_type="doubledice", bet=bet)
     elif p_sum < b_sum:
-        try:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
-        except Exception as e:
-            logging.error(f"Ошибка фиксации поражения: {e}")
-        res = f"👤 {get_mention(user_id, user_name)}\nТвои очки: {p1} + {p2} = <b>{p_sum}</b>\n🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+        res = (
+            f"👤 {get_mention(user_id, user_name)}\n"
+            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
+            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
+            f"📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
+        )
         await send_game_result(message, "loss", res, user_id=user_id, game_type="doubledice", bet=bet)
     else:
         await db.change_balance(user_id, bet)
-        try:
-            await db.record_game(user_id, "draw")
-        except Exception:
-            pass
-        res = f"🎲 Очки: <b>{p_sum} = {b_sum}</b>\n💰 Ставка <b>{fmt_num(bet)} 💰</b> возвращена!"
-        await send_game_result(message, "draw", user_id=user_id, game_type="doubledice", bet=bet)
+        await db.record_game(user_id, "draw")
+        res = (
+            f"👤 {get_mention(user_id, user_name)}\n"
+            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
+            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
+            f"💰 <b>Ничья! Ставка {fmt_num(bet)} 💰 возвращена на баланс.</b>"
+        )
+        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
 
 
 async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
@@ -894,18 +891,12 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
     if win_cond:
         win = int(bet * 1.9)
         await db.change_balance(user_id, win)
-        try:
-            await db.record_game(user_id, "win")
-        except Exception:
-            pass
+        await db.record_game(user_id, "win")
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, user_name)}\n💰 Множитель: <b>x1.9</b>\n💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
         await send_game_result(message, "win", res, user_id=user_id, game_type=game_type, bet=bet)
     else:
-        try:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
-        except Exception as e:
-            logging.error(f"Ошибка фиксации проигрыша: {e}")
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
         res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, user_name)}\n📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
         await send_game_result(message, "loss", res, user_id=user_id, game_type=game_type, bet=bet)
 
@@ -1117,7 +1108,7 @@ async def process_work_cmd(message: Message):
     )
 
 
-# ================= ГЛАВНОЕ МЕНЮ (СТАРТ) =================
+# ================= КРАСИВОЕ ГЛАВНОЕ МЕНЮ (СТАРТ) =================
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -1130,28 +1121,29 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     balance = user[2] if user else 10000
 
     text = (
-        f"🎲 <b>Добро пожаловать в игровой клуб Duel Cubes!</b>\n\n"
-        f"👤 Игрок: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
-        f"💰 Баланс: <b>{fmt_num(balance)} монет</b>\n\n"
+        f"👑 <b>DUEL CUBES | ИГРОВОЙ КЛУБ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Игрок:</b> {get_mention(message.from_user.id, message.from_user.full_name)}\n"
+        f"💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💼 <b>Заработок монет:</b>\n"
-        f"🛠 <code>ворк</code>  <code>/work</code> — накопительный доход (до 24ч)\n"
-        f"📢 <code>бонус спонсора</code> — разовые <b>+50 000 💰</b>\n\n"
-        f"📜 <b>Режимы игр:</b>\n"
+        f"├ 🛠 <code>ворк</code> — забрать зарплату (копится 24ч)\n"
+        f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
+        f"🎲 <b>Список игровых режимов:</b>\n"
         f"<blockquote expandable>"
-        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека в чате\n"
-        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль с игроком\n"
-        f"🎲 <code>кубик [ставка/вабанк]</code> — бросок против бота\n"
-        f"🎲🎲 <code>дабл [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
+        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека\n"
+        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1\n"
+        f"🎲 <code>кубик [ставка/вабанк]</code> — 1 кубик против бота\n"
+        f"🎲🎲 <code>кубы [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
         f"🚀 <code>лесенка [ставка/вабанк]</code> — Лесенка (до x7.5)\n"
-        f"📈 <code>больше [ставка/вабанк]</code> — Больше (4, 5, 6)\n"
-        f"📉 <code>меньше [ставка/вабанк]</code> — Меньше (1, 2, 3)\n"
-        f"⚖️ <code>четное [ставка/вабанк]</code> — Чётное число\n"
-        f"🎲 <code>нечетное [ставка/вабанк]</code> — Нечётное число"
+        f"📈 <code>больше [ставка/вабанк]</code> — Числа 4, 5, 6\n"
+        f"📉 <code>меньше [ставка/вабанк]</code> — Числа 1, 2, 3\n"
+        f"⚖️ <code>четное [ставка/вабанк]</code> — Чётный кубик\n"
+        f"🎯 <code>нечетное [ставка/вабанк]</code> — Нечётный кубик"
         f"</blockquote>\n\n"
-        f"📊 <b>Статистика:</b>\n"
+        f"📊 <b>Навигация и команды:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n"
-        f"🤝 <code>реф</code> — рефералка (3% от ставок друзей)\n"
-        f"💸 <code>перевод [сумма] @username</code> — передать монеты"
+        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code>"
     )
     await safe_reply(message, text)
 
@@ -1257,7 +1249,7 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
 
     bet = resolve_bet_amount(args[0] if args else None, user_bal)
     if bet is None:
-        return await safe_reply(message, "❌ <b>Укажите корректную ставку!</b>\nФормат: <code>дабл 500</code> или <code>дабл вабанк</code>")
+        return await safe_reply(message, "❌ <b>Укажите корректную ставку!</b>\nФормат: <code>кубы 500</code> или <code>дабл вабанк</code>")
 
     if bet < 100:
         return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
@@ -1334,7 +1326,7 @@ async def process_ladder_cmd(message: Message, args: List[str]):
     await safe_reply(message, text, reply_markup=ladder_keyboard(user_id, 0))
 
 
-# ================= ДУЭЛЬ СО СКРЫТЫМ КОММЕНТАРИЕМ И ХРАНЕНИЕМ В БД =================
+# ================= ДУЭЛЬ =================
 async def process_duel_cmd(message: Message, args: List[str]):
     challenger = message.from_user
     await db.register_user(challenger.id, challenger.full_name, challenger.username)
@@ -1644,10 +1636,14 @@ async def handle_all_text_commands(message: Message):
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
 
-    # Старт и кубы
-    if cmd in ["start", "старт", "кубы", "куби", "кубсы", "меню", "menu", "помощь", "help", "инфо"]:
+    # Старт, бот и меню (реагирует на «бот»)
+    if cmd in ["start", "старт", "бот", "bot", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
+
+    # Кубы теперь запускают режим «2 кубика»
+    elif cmd in ["кубы", "кубики", "кубсы", "дабл", "doubledice", "2dice", "дубль", "2кубика"]:
+        await process_doubledice_cmd(message, args)
 
     # Чеки
     elif cmd in ["check", "чек", "чеки", "раздача"]:
@@ -1671,8 +1667,6 @@ async def handle_all_text_commands(message: Message):
     # Игры
     elif cmd in ["dice", "кубик", "кость", "кости", "куб"]:
         await process_dice_cmd(message, args)
-    elif cmd in ["doubledice", "2dice", "дабл", "дубль", "2кубика"]:
-        await process_doubledice_cmd(message, args)
     elif cmd in ["ladder", "лесенка", "лестница", "ступень"]:
         await process_ladder_cmd(message, args)
     elif cmd in ["duel", "дуэль", "вызов", "дуели", "дуель"]:
@@ -1910,266 +1904,6 @@ async def handle_all_text_commands(message: Message):
         await safe_reply(message, f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.")
 
 
-# ================= CALLBACKS =================
-@dp.callback_query(F.data.startswith("rep_"))
-async def cb_quick_replay(call: CallbackQuery):
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        return await call.answer("❌ Ошибка параметров!", show_alert=True)
-    
-    game_type = parts[1]
-    try:
-        bet = int(parts[2])
-        allowed_user_id = int(parts[3])
-    except ValueError:
-        return await call.answer("❌ Ошибка данных!", show_alert=True)
-
-    if call.from_user.id != allowed_user_id:
-        return await call.answer("❌ Это не ваша кнопка реванша!", show_alert=True)
-
-    user_id = call.from_user.id
-    user_name = call.from_user.full_name
-    username = call.from_user.username
-
-    await db.register_user(user_id, user_name, username)
-    user = await db.get_user(user_id)
-    user_bal = user[2] if user else 0
-
-    if user_bal < 100:
-        return await call.answer(f"❌ Недостаточно монет! Баланс: {fmt_num(user_bal)} 💰\nНапишите ворк!", show_alert=True)
-
-    actual_bet = min(bet, user_bal)
-    await call.answer()
-
-    if game_type == "dice":
-        await run_dice_game(call.message, user_id, user_name, actual_bet)
-    elif game_type == "doubledice":
-        await run_doubledice_game(call.message, user_id, user_name, actual_bet)
-    elif game_type in ["over", "under", "even", "odd"]:
-        await run_simple_bet_game(call.message, user_id, user_name, actual_bet, game_type)
-
-
-@dp.callback_query(F.data.startswith("ac_"))
-async def cb_accept_duel(call: CallbackQuery):
-    duel_id = call.data.replace("ac_", "")
-    
-    duel = await db.get_duel(duel_id)
-    if not duel:
-        return await call.answer("❌ Дуэль не найдена или уже завершилась!", show_alert=True)
-
-    if call.from_user.id != duel["opponent_id"]:
-        return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
-
-    if duel["status"] != "pending":
-        return await call.answer("Дуэль уже началась!", show_alert=True)
-
-    c_id, o_id, bet = duel["challenger_id"], duel["opponent_id"], int(duel["bet"])
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Сначала подпишитесь на канал!", show_alert=True)
-
-    c_data = await db.get_user(c_id)
-    o_data = await db.get_user(o_id)
-
-    if not c_data or not o_data or c_data[2] < bet or o_data[2] < bet:
-        await db.delete_duel(duel_id)
-        try:
-            await call.message.edit_text("❌ <b>Дуэль отменена: у одного из игроков недостаточно монет!</b>", parse_mode="HTML")
-        except Exception:
-            pass
-        return await call.answer("Недостаточно средств у игроков!", show_alert=True)
-
-    # Атомарное обновление статуса
-    await db.update_duel_status(duel_id, "in_progress")
-    await db.change_balance(c_id, -bet)
-    await db.change_balance(o_id, -bet)
-    await db.add_turnover(c_id, bet)
-    await db.add_turnover(o_id, bet)
-
-    await call.answer("⚔️ Вызов принят!")
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{fmt_num(bet)} 💰</b>", parse_mode="HTML")
-    except Exception:
-        pass
-
-    await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
-    c_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    c_val = int(c_dice.dice.value)
-
-    await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
-    o_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    o_val = int(o_dice.dice.value)
-
-    win_sum = int(bet * 1.9)
-
-    if c_val > o_val:
-        await db.change_balance(c_id, win_sum)
-        await db.record_game(c_id, "win")
-        await db.record_game(o_id, "loss")
-        await db.process_referral_loss(o_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=c_id)
-    elif o_val > c_val:
-        await db.change_balance(o_id, win_sum)
-        await db.record_game(o_id, "win")
-        await db.record_game(c_id, "loss")
-        await db.process_referral_loss(c_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=o_id)
-    else:
-        await db.change_balance(c_id, bet)
-        await db.change_balance(o_id, bet)
-        await db.record_game(c_id, "draw")
-        await db.record_game(o_id, "draw")
-        res = f"🎲 Счёт: <b>{c_val} = {o_val}</b>\n💰 Ставки возвращены (+{fmt_num(bet)} 💰 каждому)."
-        await send_game_result(call.message, "draw", res)
-
-    await db.delete_duel(duel_id)
-
-
-@dp.callback_query(F.data.startswith("dc_"))
-async def cb_decline_duel(call: CallbackQuery):
-    duel_id = call.data.replace("dc_", "")
-    duel = await db.get_duel(duel_id)
-    if not duel:
-        return await call.answer("❌ Дуэль уже неактивна!", show_alert=True)
-
-    if call.from_user.id not in [duel["opponent_id"], duel["challenger_id"]]:
-        return await call.answer("❌ Вы не участвуете в этой дуэли!", show_alert=True)
-
-    await db.delete_duel(duel_id)
-    try:
-        await call.message.edit_text("❌ <b>Дуэль была отклонена.</b>", parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer("Дуэль отклонена.")
-
-
-@dp.callback_query(F.data.startswith("ld_step_"))
-async def cb_ladder_step(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_step_", ""))
-    except ValueError:
-        return
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена!", show_alert=True)
-
-    game = active_ladders[user_id]
-    if game.get("is_rolling"):
-        return await call.answer("⏳ Кубик уже брошен, подождите!", show_alert=False)
-
-    game["is_rolling"] = True
-    await call.message.edit_reply_markup(reply_markup=None)
-
-    await call.message.answer(f"🎲 Бросок кубика для подъема {get_mention(user_id, call.from_user.full_name)}:", parse_mode="HTML")
-    dice_msg = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    val = int(dice_msg.dice.value)
-
-    if val in [1, 2]:
-        bet = game["bet"]
-        if "task" in game and not game["task"].done():
-            game["task"].cancel()
-        del active_ladders[user_id]
-        try:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
-        except Exception:
-            pass
-
-        res = (
-            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-            f"🎲 Выпало число: [ <b>{val}</b> ] (Осечка 1-2)\n"
-            f"📉 Ставка сгорела: <b>-{fmt_num(bet)} 💰</b>"
-        )
-        return await send_game_result(call.message, "loss", res, user_id=user_id)
-
-    game["step"] += 1
-    game["is_rolling"] = False
-    step = game["step"]
-    mult = LADDER_STEPS[step]
-
-    if step >= 5:
-        win = int(game["bet"] * mult)
-        if "task" in game and not game["task"].done():
-            game["task"].cancel()
-        del active_ladders[user_id]
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-
-        res = (
-            f"👑 <b>ВЕРШИНА ПОКОРЕНА! ВЫ ПРОШЛИ ВСЮ ЛЕСЕНКУ!</b>\n\n"
-            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-            f"🎲 Выпало: [ <b>{val}</b> ]\n"
-            f"{render_ladder(5)}\n\n"
-            f"🔥 Максимальный множитель: <b>x{mult}</b>\n"
-            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        )
-        return await send_game_result(call.message, "win", res, user_id=user_id)
-
-    current_win = int(game["bet"] * mult)
-    res = (
-        f"🧗 <b>УСПЕШНЫЙ ШАГ ВВЕРХ!</b>\n\n"
-        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-        f"🎲 Выпало: [ <b>{val}</b> ]\n\n"
-        f"{render_ladder(step)}\n\n"
-        f"📈 Множитель: <b>x{mult}</b> (Куш: <b>{fmt_num(current_win)} 💰</b>)"
-    )
-    await call.message.answer(res, reply_markup=ladder_keyboard(user_id, step), parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("ld_cash_"))
-async def cb_ladder_cash(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_cash_", ""))
-    except ValueError:
-        return
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена!", show_alert=True)
-
-    game = active_ladders[user_id]
-    mult = LADDER_STEPS[game["step"]]
-    win = int(game["bet"] * mult)
-
-    if "task" in game and not game["task"].done():
-        game["task"].cancel()
-
-    del active_ladders[user_id]
-    await db.change_balance(user_id, win)
-    await db.record_game(user_id, "win")
-
-    await call.message.edit_reply_markup(reply_markup=None)
-
-    res = (
-        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
-        f"🧗 Остановлено на: <b>Ступень {game['step']}</b>\n"
-        f"📈 Зафиксирован множитель: <b>x{mult}</b>\n"
-        f"💵 На баланс зачислено: <b>+{fmt_num(win)} 💰</b>"
-    )
-    await send_game_result(call.message, "win", res, user_id=user_id)
-
-
 # ================= ЗАПУСК =================
 async def handle_ping(request):
     return web.Response(text="Duel Cubes Bot is alive! 🎲", status=200)
@@ -2185,7 +1919,6 @@ async def on_startup(bot: Bot):
         BotCommand(command="check", description="Создать чек-раздачу в чате 🎁"),
         BotCommand(command="clear", description="Очистить сообщения в чате 🧹"),
         BotCommand(command="dice", description="Кубик против бота 🤖"),
-        BotCommand(command="doubledice", description="2 кубика (x3 за дубль) 🎲🎲"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
         BotCommand(command="chatstats", description="Статистика чата 📊"),
