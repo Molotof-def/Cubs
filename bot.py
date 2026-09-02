@@ -96,6 +96,7 @@ dp = Dispatcher()
 active_ladders: Dict[int, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_quizzes: Dict[int, dict] = {}
+pending_confirmations: Dict[str, dict] = {}
 known_groups: set = set()
 chat_recent_users: Dict[int, List[int]] = {}
 user_loss_streaks: Dict[int, int] = {}
@@ -121,13 +122,30 @@ def replay_keyboard(game_type: str, bet: int, user_id: int):
     return builder.as_markup()
 
 
+def confirm_bet_keyboard(conf_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подтвердить ставку", callback_data=f"conf_ok_{conf_id}")
+    builder.button(text="❌ Отмена", callback_data=f"conf_no_{conf_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def report_admin_keyboard(target_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔇 Мут 30 мин", callback_data=f"adm_mute_{target_id}_1800")
+    builder.button(text="⚠️ Варн", callback_data=f"adm_warn_{target_id}")
+    builder.button(text="🛑 Бан", callback_data=f"adm_ban_{target_id}")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
 async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
-        await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
+        return await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Ошибка HTML-парсера ({e}), отправка текстом без тегов...")
+        logging.warning(f"Ошибка HTML-парсера ({e}), отправка обычным текстом...")
         clean_text = re.sub(r'<[^>]+>', '', text)
-        await message.reply(text=clean_text, reply_markup=reply_markup)
+        return await message.reply(text=clean_text, reply_markup=reply_markup)
 
 
 async def send_game_result(message: Message, result_type: str, caption: str, user_id: Optional[int] = None, game_type: Optional[str] = None, bet: Optional[int] = None, reply_markup=None):
@@ -648,6 +666,138 @@ async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Option
     return None, "Пользователь", args
 
 
+# ================= ПРОВЕРКА КРУПНОЙ СТАВКИ (ЗАЩИТА ОТ СЛУЧАЙНОСТЕЙ) =================
+async def check_bet_confirmation(message: Message, user_id: int, user_name: str, bet: int, game_type: str, direct_callback) -> bool:
+    user = await db.get_user(user_id)
+    user_bal = user[2] if user else 0
+
+    if user_bal < bet:
+        await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
+        return False
+
+    # Срабатывает, если ставка > 50% от банка или >= 500 000 монет
+    if (bet >= 500000 or (user_bal > 0 and bet >= int(user_bal * 0.5))) and bet > 1000:
+        conf_id = uuid.uuid4().hex[:8]
+        pending_confirmations[conf_id] = {
+            "user_id": user_id,
+            "user_name": user_name,
+            "bet": bet,
+            "game_type": game_type,
+            "handler": direct_callback,
+            "message": message
+        }
+
+        text = (
+            f"⚠️ <b>ВНИМАНИЕ! КРУПНАЯ СТАВКА!</b>\n\n"
+            f"👤 Игрок: {get_mention(user_id, user_name)}\n"
+            f"💰 Вы ставите <b>{fmt_num(bet)} 💰</b> (более 50% от вашего баланса <code>{fmt_num(user_bal)} 💰</code>).\n\n"
+            f"<i>Подтвердите действие во избежание случайного нажатия:</i>"
+        )
+        await safe_reply(message, text, reply_markup=confirm_bet_keyboard(conf_id))
+        return False
+
+    return True
+
+
+@dp.callback_query(F.data.startswith("conf_ok_"))
+async def cb_confirm_ok(call: CallbackQuery):
+    conf_id = call.data.replace("conf_ok_", "")
+    if conf_id not in pending_confirmations:
+        return await call.answer("❌ Запрос устарел или уже выполнен!", show_alert=True)
+
+    data = pending_confirmations.pop(conf_id)
+    if call.from_user.id != data["user_id"]:
+        return await call.answer("❌ Это не ваша ставка!", show_alert=True)
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    handler = data["handler"]
+    await handler(data["message"], data["user_id"], data["user_name"], data["bet"])
+
+
+@dp.callback_query(F.data.startswith("conf_no_"))
+async def cb_confirm_no(call: CallbackQuery):
+    conf_id = call.data.replace("conf_no_", "")
+    if conf_id not in pending_confirmations:
+        return await call.answer("❌ Запрос уже отменен!", show_alert=True)
+
+    data = pending_confirmations.pop(conf_id)
+    if call.from_user.id != data["user_id"]:
+        return await call.answer("❌ Это не ваша ставка!", show_alert=True)
+
+    try:
+        await call.message.edit_text("🚫 <b>Ставка была отменена игроком.</b>", parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer("Отменено.")
+
+
+# ================= СИСТЕМА РЕПОРТОВ =================
+async def process_report_cmd(message: Message, args: List[str]):
+    if message.chat.type not in ["group", "supergroup"]:
+        return await safe_reply(message, "❌ Команда доступна только в группах!")
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await safe_reply(message, "❌ Ответьте на сообщение нарушителя командой: <code>репорт [причина]</code>")
+
+    target = message.reply_to_message.from_user
+    if target.id == message.from_user.id:
+        return await safe_reply(message, "❌ Нельзя жаловаться на самого себя!")
+
+    if target.is_bot:
+        return await safe_reply(message, "❌ Нельзя отправлять жалобы на ботов!")
+
+    reason = " ".join(args).strip() if args else "Спам / Нарушение правил"
+    reported_text = html.escape(message.reply_to_message.text or "[Медиа/Стикер]")
+    
+    admin_alert_text = (
+        f"🚨 <b>ЖАЛОБА НА СООБЩЕНИЕ В ЧАТЕ!</b>\n"
+        f"👥 Чат: <b>{html.escape(message.chat.title or 'Группа')}</b>\n\n"
+        f"👤 Отправитель жалобы: {get_mention(message.from_user.id, message.from_user.full_name)}\n"
+        f"🛑 Нарушитель: {get_mention(target.id, target.full_name)} (ID: <code>{target.id}</code>)\n"
+        f"📝 Причина: <b>{html.escape(reason)}</b>\n\n"
+        f"💬 Текст сообщения:\n<i>«{reported_text[:300]}»</i>"
+    )
+
+    await safe_reply(message, f"✅ <b>Жалоба на пользователя {get_mention(target.id, target.full_name)} принята администраторами!</b>", reply_markup=report_admin_keyboard(target.id))
+
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def cb_admin_report_action(call: CallbackQuery):
+    parts = call.data.split("_")
+    action = parts[1]
+    target_id = int(parts[2])
+    
+    if not await db.is_admin(call.from_user.id, call.message.chat.id):
+        return await call.answer("❌ Только администратор может применить наказание!", show_alert=True)
+
+    try:
+        if action == "mute":
+            dur = int(parts[3])
+            until = datetime.now() + timedelta(seconds=dur)
+            await call.message.chat.restrict(user_id=target_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+            await call.message.reply(f"🔇 Администратор {get_mention(call.from_user.id, call.from_user.full_name)} выдал мут нарушителю на {format_duration(dur)}!", parse_mode="HTML")
+        elif action == "warn":
+            warns = await db.add_warn(target_id)
+            if warns >= 3:
+                await call.message.chat.ban(user_id=target_id)
+                await db.reset_warns(target_id)
+                await call.message.reply(f"🛑 Нарушитель набрал 3/3 варнов и забанен!", parse_mode="HTML")
+            else:
+                await call.message.reply(f"⚠️ Нарушителю выдан варн ({warns}/3)!", parse_mode="HTML")
+        elif action == "ban":
+            await call.message.chat.ban(user_id=target_id)
+            await call.message.reply(f"🛑 Нарушитель забанен администратором!", parse_mode="HTML")
+            
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.answer("Наказание применено!")
+    except Exception as e:
+        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
 # ================= ФОНОВЫЙ ЦИКЛ ВИКТОРИН =================
 async def quiz_background_worker():
     await asyncio.sleep(60)
@@ -1108,7 +1258,7 @@ async def process_work_cmd(message: Message):
     )
 
 
-# ================= КРАСИВОЕ ГЛАВНОЕ МЕНЮ (СТАРТ) =================
+# ================= КРАСИВОЕ ГЛАВНОЕ МЕНЮ =================
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     ref_id = None
     if ref_arg and ref_arg.startswith("ref_"):
@@ -1143,7 +1293,8 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"</blockquote>\n\n"
         f"📊 <b>Навигация и команды:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code>\n"
-        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code>"
+        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code>\n"
+        f"🚨 <code>репорт</code> (ответом на спам) — жалоба админам"
     )
     await safe_reply(message, text)
 
@@ -1187,7 +1338,6 @@ async def process_chat_stats_cmd(message: Message):
     await safe_reply(message, text)
 
 
-# ================= КОМАНДА ОЧИСТКИ СООБЩЕНИЙ =================
 async def process_clear_cmd(message: Message, args: List[str]):
     if message.chat.type not in ["group", "supergroup"]:
         return await safe_reply(message, "❌ Очистка сообщений доступна только в группах!")
@@ -1234,7 +1384,9 @@ async def process_dice_cmd(message: Message, args: List[str]):
     if bet < 100:
         return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
 
-    await run_dice_game(message, user_id, message.from_user.full_name, bet)
+    # Проверка защиты от случайной ставки
+    if await check_bet_confirmation(message, user_id, message.from_user.full_name, bet, "dice", run_dice_game):
+        await run_dice_game(message, user_id, message.from_user.full_name, bet)
 
 
 async def process_doubledice_cmd(message: Message, args: List[str]):
@@ -1254,7 +1406,9 @@ async def process_doubledice_cmd(message: Message, args: List[str]):
     if bet < 100:
         return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
 
-    await run_doubledice_game(message, user_id, message.from_user.full_name, bet)
+    # Проверка защиты от случайной ставки
+    if await check_bet_confirmation(message, user_id, message.from_user.full_name, bet, "doubledice", run_doubledice_game):
+        await run_doubledice_game(message, user_id, message.from_user.full_name, bet)
 
 
 async def process_simple_bet(message: Message, args: List[str], game_type: str):
@@ -1274,7 +1428,11 @@ async def process_simple_bet(message: Message, args: List[str], game_type: str):
     if bet < 100:
         return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
 
-    await run_simple_bet_game(message, user_id, message.from_user.full_name, bet, game_type)
+    async def simple_wrapper(msg, uid, uname, b):
+        await run_simple_bet_game(msg, uid, uname, b, game_type)
+
+    if await check_bet_confirmation(message, user_id, message.from_user.full_name, bet, game_type, simple_wrapper):
+        await run_simple_bet_game(message, user_id, message.from_user.full_name, bet, game_type)
 
 
 async def process_ladder_cmd(message: Message, args: List[str]):
@@ -1300,30 +1458,33 @@ async def process_ladder_cmd(message: Message, args: List[str]):
     if user_bal < bet:
         return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
 
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
+    async def start_ladder_direct(msg, uid, uname, b):
+        await db.change_balance(uid, -b)
+        await db.add_turnover(uid, b)
 
-    timeout_task = asyncio.create_task(ladder_timeout_watcher(user_id, message))
+        timeout_task = asyncio.create_task(ladder_timeout_watcher(uid, msg))
+        active_ladders[uid] = {
+            "user_id": uid,
+            "bet": b,
+            "step": 0,
+            "is_rolling": False,
+            "task": timeout_task
+        }
 
-    active_ladders[user_id] = {
-        "user_id": user_id,
-        "bet": bet,
-        "step": 0,
-        "is_rolling": False,
-        "task": timeout_task
-    }
+        is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if b == user_bal else ""
+        text = (
+            f"🚀 <b>КУБИЧЕСКАЯ ЛЕСЕНКА</b>\n\n"
+            f"{is_allin}"
+            f"👤 Игрок: {get_mention(uid, uname)}\n"
+            f"💰 Ставка: <b>{fmt_num(b)} 💰</b>\n"
+            f"⏱ <i>Таймаут неактивности: 3 минуты</i>\n\n"
+            f"{render_ladder(0)}\n\n"
+            f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и сгорание ставки!</i>"
+        )
+        await safe_reply(msg, text, reply_markup=ladder_keyboard(uid, 0))
 
-    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
-    text = (
-        f"🚀 <b>КУБИЧЕСКАЯ ЛЕСЕНКА</b>\n\n"
-        f"{is_allin}"
-        f"👤 Игрок: {get_mention(user_id, message.from_user.full_name)}\n"
-        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b>\n"
-        f"⏱ <i>Таймаут неактивности: 3 минуты</i>\n\n"
-        f"{render_ladder(0)}\n\n"
-        f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и сгорание ставки!</i>"
-    )
-    await safe_reply(message, text, reply_markup=ladder_keyboard(user_id, 0))
+    if await check_bet_confirmation(message, user_id, message.from_user.full_name, bet, "ladder", start_ladder_direct):
+        await start_ladder_direct(message, user_id, message.from_user.full_name, bet)
 
 
 # ================= ДУЭЛЬ =================
@@ -1636,10 +1797,14 @@ async def handle_all_text_commands(message: Message):
     cmd = cmd_raw.lstrip("/").split("@")[0]
     args = parts[1:]
 
-    # Старт, бот и меню (реагирует на «бот»)
+    # Старт, бот и меню
     if cmd in ["start", "старт", "бот", "bot", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         await process_start_cmd(message, ref_arg)
+
+    # Репорт
+    elif cmd in ["report", "репорт", "жалоба", "спам"]:
+        await process_report_cmd(message, args)
 
     # Кубы теперь запускают режим «2 кубика»
     elif cmd in ["кубы", "кубики", "кубсы", "дабл", "doubledice", "2dice", "дубль", "2кубика"]:
@@ -1904,6 +2069,262 @@ async def handle_all_text_commands(message: Message):
         await safe_reply(message, f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.")
 
 
+# ================= CALLBACKS =================
+@dp.callback_query(F.data.startswith("rep_"))
+async def cb_quick_replay(call: CallbackQuery):
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
+    parts = call.data.split("_")
+    if len(parts) < 4:
+        return await call.answer("❌ Ошибка параметров!", show_alert=True)
+    
+    game_type = parts[1]
+    try:
+        bet = int(parts[2])
+        allowed_user_id = int(parts[3])
+    except ValueError:
+        return await call.answer("❌ Ошибка данных ставки!", show_alert=True)
+
+    if call.from_user.id != allowed_user_id:
+        return await call.answer("❌ Это не ваша кнопка реванша!", show_alert=True)
+
+    user_id = call.from_user.id
+    user_name = call.from_user.full_name
+    username = call.from_user.username
+
+    await db.register_user(user_id, user_name, username)
+    user = await db.get_user(user_id)
+    user_bal = user[2] if user else 0
+
+    if user_bal < 100:
+        return await call.answer(f"❌ Недостаточно монет! Баланс: {fmt_num(user_bal)} 💰\nНапишите ворк!", show_alert=True)
+
+    actual_bet = min(bet, user_bal)
+    await call.answer()
+
+    if game_type == "dice":
+        await run_dice_game(call.message, user_id, user_name, actual_bet)
+    elif game_type == "doubledice":
+        await run_doubledice_game(call.message, user_id, user_name, actual_bet)
+    elif game_type in ["over", "under", "even", "odd"]:
+        await run_simple_bet_game(call.message, user_id, user_name, actual_bet, game_type)
+
+
+@dp.callback_query(F.data.startswith("ac_"))
+async def cb_accept_duel(call: CallbackQuery):
+    duel_id = call.data.replace("ac_", "")
+    
+    duel = await db.get_duel(duel_id)
+    if not duel:
+        return await call.answer("❌ Дуэль не найдена или уже завершилась!", show_alert=True)
+
+    if call.from_user.id != duel["opponent_id"]:
+        return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
+
+    if duel["status"] != "pending":
+        return await call.answer("Дуэль уже началась!", show_alert=True)
+
+    c_id, o_id, bet = duel["challenger_id"], duel["opponent_id"], int(duel["bet"])
+
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Сначала подпишитесь на канал!", show_alert=True)
+
+    c_data = await db.get_user(c_id)
+    o_data = await db.get_user(o_id)
+
+    if not c_data or not o_data or c_data[2] < bet or o_data[2] < bet:
+        await db.delete_duel(duel_id)
+        try:
+            await call.message.edit_text("❌ <b>Дуэль отменена: у одного из игроков недостаточно монет!</b>", parse_mode="HTML")
+        except Exception:
+            pass
+        return await call.answer("Недостаточно средств у игроков!", show_alert=True)
+
+    await db.update_duel_status(duel_id, "in_progress")
+    await db.change_balance(c_id, -bet)
+    await db.change_balance(o_id, -bet)
+    await db.add_turnover(c_id, bet)
+    await db.add_turnover(o_id, bet)
+
+    await call.answer("⚔️ Вызов принят!")
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{fmt_num(bet)} 💰</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+    await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
+    c_dice = await call.message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    c_val = int(c_dice.dice.value)
+
+    await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
+    o_dice = await call.message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    o_val = int(o_dice.dice.value)
+
+    win_sum = int(bet * 1.9)
+
+    if c_val > o_val:
+        await db.change_balance(c_id, win_sum)
+        await db.record_game(c_id, "win")
+        await db.record_game(o_id, "loss")
+        await db.process_referral_loss(o_id, bet)
+        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
+        await send_game_result(call.message, "win", res, user_id=c_id)
+    elif o_val > c_val:
+        await db.change_balance(o_id, win_sum)
+        await db.record_game(o_id, "win")
+        await db.record_game(c_id, "loss")
+        await db.process_referral_loss(c_id, bet)
+        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
+        await send_game_result(call.message, "win", res, user_id=o_id)
+    else:
+        await db.change_balance(c_id, bet)
+        await db.change_balance(o_id, bet)
+        await db.record_game(c_id, "draw")
+        await db.record_game(o_id, "draw")
+        res = f"🎲 Счёт: <b>{c_val} = {o_val}</b>\n💰 Ставки возвращены (+{fmt_num(bet)} 💰 каждому)."
+        await send_game_result(call.message, "draw", res)
+
+    await db.delete_duel(duel_id)
+
+
+@dp.callback_query(F.data.startswith("dc_"))
+async def cb_decline_duel(call: CallbackQuery):
+    duel_id = call.data.replace("dc_", "")
+    duel = await db.get_duel(duel_id)
+    if not duel:
+        return await call.answer("❌ Дуэль уже неактивна!", show_alert=True)
+
+    if call.from_user.id not in [duel["opponent_id"], duel["challenger_id"]]:
+        return await call.answer("❌ Вы не участвуете в этой дуэли!", show_alert=True)
+
+    await db.delete_duel(duel_id)
+    try:
+        await call.message.edit_text("❌ <b>Дуэль была отклонена.</b>", parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer("Дуэль отклонена.")
+
+
+@dp.callback_query(F.data.startswith("ld_step_"))
+async def cb_ladder_step(call: CallbackQuery):
+    try:
+        user_id = int(call.data.replace("ld_step_", ""))
+    except ValueError:
+        return
+
+    if call.from_user.id != user_id:
+        return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
+
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
+    if user_id not in active_ladders:
+        return await call.answer("❌ Игра уже завершена!", show_alert=True)
+
+    game = active_ladders[user_id]
+    if game.get("is_rolling"):
+        return await call.answer("⏳ Кубик уже брошен, подождите!", show_alert=False)
+
+    game["is_rolling"] = True
+    await call.message.edit_reply_markup(reply_markup=None)
+
+    await call.message.answer(f"🎲 Бросок кубика для подъема {get_mention(user_id, call.from_user.full_name)}:", parse_mode="HTML")
+    dice_msg = await call.message.answer_dice(emoji="🎲")
+    await asyncio.sleep(4.0)
+    val = int(dice_msg.dice.value)
+
+    if val in [1, 2]:
+        bet = game["bet"]
+        if "task" in game and not game["task"].done():
+            game["task"].cancel()
+        del active_ladders[user_id]
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+
+        res = (
+            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
+            f"🎲 Выпало число: [ <b>{val}</b> ] (Осечка 1-2)\n"
+            f"📉 Ставка сгорела: <b>-{fmt_num(bet)} 💰</b>"
+        )
+        return await send_game_result(call.message, "loss", res, user_id=user_id)
+
+    game["step"] += 1
+    game["is_rolling"] = False
+    step = game["step"]
+    mult = LADDER_STEPS[step]
+
+    if step >= 5:
+        win = int(game["bet"] * mult)
+        if "task" in game and not game["task"].done():
+            game["task"].cancel()
+        del active_ladders[user_id]
+        await db.change_balance(user_id, win)
+        await db.record_game(user_id, "win")
+
+        res = (
+            f"👑 <b>ВЕРШИНА ПОКОРЕНА! ВЫ ПРОШЛИ ВСЮ ЛЕСЕНКУ!</b>\n\n"
+            f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
+            f"🎲 Выпало: [ <b>{val}</b> ]\n"
+            f"{render_ladder(5)}\n\n"
+            f"🔥 Максимальный множитель: <b>x{mult}</b>\n"
+            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
+        )
+        return await send_game_result(call.message, "win", res, user_id=user_id)
+
+    current_win = int(game["bet"] * mult)
+    res = (
+        f"🧗 <b>УСПЕШНЫЙ ШАГ ВВЕРХ!</b>\n\n"
+        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
+        f"🎲 Выпало: [ <b>{val}</b> ]\n\n"
+        f"{render_ladder(step)}\n\n"
+        f"📈 Множитель: <b>x{mult}</b> (Куш: <b>{fmt_num(current_win)} 💰</b>)"
+    )
+    await call.message.answer(res, reply_markup=ladder_keyboard(user_id, step), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("ld_cash_"))
+async def cb_ladder_cash(call: CallbackQuery):
+    try:
+        user_id = int(call.data.replace("ld_cash_", ""))
+    except ValueError:
+        return
+
+    if call.from_user.id != user_id:
+        return await call.answer("❌ Это не ваша игра!", show_alert=True)
+
+    if not await check_subscription(call.from_user.id):
+        return await call.answer("⚠️ Подпишитесь на канал для игры!", show_alert=True)
+
+    if user_id not in active_ladders:
+        return await call.answer("❌ Игра уже завершена!", show_alert=True)
+
+    game = active_ladders[user_id]
+    mult = LADDER_STEPS[game["step"]]
+    win = int(game["bet"] * mult)
+
+    if "task" in game and not game["task"].done():
+        game["task"].cancel()
+
+    del active_ladders[user_id]
+    await db.change_balance(user_id, win)
+    await db.record_game(user_id, "win")
+
+    await call.message.edit_reply_markup(reply_markup=None)
+
+    res = (
+        f"👤 {get_mention(user_id, call.from_user.full_name)}\n"
+        f"🧗 Остановлено на: <b>Ступень {game['step']}</b>\n"
+        f"📈 Зафиксирован множитель: <b>x{mult}</b>\n"
+        f"💵 На баланс зачислено: <b>+{fmt_num(win)} 💰</b>"
+    )
+    await send_game_result(call.message, "win", res, user_id=user_id)
+
+
 # ================= ЗАПУСК =================
 async def handle_ping(request):
     return web.Response(text="Duel Cubes Bot is alive! 🎲", status=200)
@@ -1917,6 +2338,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="work", description="Забрать накопленную зарплату 💼"),
         BotCommand(command="sponsor", description="Бонус за спонсора (+50k) 📢"),
         BotCommand(command="check", description="Создать чек-раздачу в чате 🎁"),
+        BotCommand(command="report", description="Пожаловаться на спамера 🚨"),
         BotCommand(command="clear", description="Очистить сообщения в чате 🧹"),
         BotCommand(command="dice", description="Кубик против бота 🤖"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
