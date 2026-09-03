@@ -138,7 +138,6 @@ def report_admin_keyboard(target_id: int):
 
 def top_menu_keyboard(current_tab: str = "balance"):
     builder = InlineKeyboardBuilder()
-    
     b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
     t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
     w_text = "🏆 Победы 🟢" if current_tab == "wins" else "🏆 Победы"
@@ -174,7 +173,7 @@ async def get_top_content(tab: str) -> str:
         text = title
         for i, r in enumerate(rows, 1):
             place = medals.get(i, f"<b>{i}.</b>")
-            text += f"{place} {html.escape(r['username'] or 'Аноним')} — <code>{fmt_num(r['turnover'])} 💰</code> оброта\n"
+            text += f"{place} {html.escape(r['username'] or 'Аноним')} — <code>{fmt_num(r['turnover'])} 💰</code> оборота\n"
         return text
 
     elif tab == "wins":
@@ -625,6 +624,15 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE active_duels SET status = $1 WHERE duel_id = $2", status, duel_id)
 
+    # Фоновая авто-очистка мусора в БД (удаляет старые дуэли старше 30 минут)
+    async def cleanup_expired_data(self):
+        async with self.pool.acquire() as conn:
+            deleted_duels = await conn.execute("""
+                DELETE FROM active_duels 
+                WHERE created_at < NOW() - INTERVAL '30 minutes'
+            """)
+            logging.info(f"🧹 Фоновая очистка БД: удалены устаревшие записи ({deleted_duels}).")
+
 
 db = Database(DATABASE_URL)
 
@@ -1038,7 +1046,7 @@ async def process_deladmin_cmd(message: Message, args: List[str]):
     await safe_reply(message, f"🚫 {get_mention(target_id, target_name)} снят с должности Администратора этого чата.")
 
 
-# ================= ФОНОВЫЙ ЦИКЛ ВИКТОРИН =================
+# ================= ФОНОВЫЙ ЦИКЛ ВИКТОРИН (СТРОГО ОТ 50 ЧЕЛОВЕК) =================
 async def quiz_background_worker():
     await asyncio.sleep(60)
     while True:
@@ -1046,7 +1054,18 @@ async def quiz_background_worker():
             await asyncio.sleep(random.randint(1500, 2400))
             if not known_groups:
                 continue
+
             target_chat_id = random.choice(list(known_groups))
+
+            try:
+                member_count = await bot.get_chat_member_count(target_chat_id)
+                if member_count < 50:
+                    continue
+            except Exception as e:
+                logging.warning(f"Не удалось получить количество участников чата {target_chat_id} ({e}), пропуск.")
+                known_groups.discard(target_chat_id)
+                continue
+
             reward = random.randint(25000, 60000)
 
             if random.random() < 0.5:
@@ -1074,6 +1093,19 @@ async def quiz_background_worker():
         except Exception as e:
             logging.error(f"Ошибка quiz worker: {e}")
             await asyncio.sleep(60)
+
+
+# ================= ФОНОВАЯ ОЧИСТКА БАЗЫ ДАННЫХ (РАЗ В 6 ЧАСОВ) =================
+async def db_cleanup_background_worker():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await db.cleanup_expired_data()
+            active_checks.clear()
+            pending_confirmations.clear()
+        except Exception as e:
+            logging.error(f"Ошибка очистки базы данных: {e}")
+        await asyncio.sleep(21600)  # Раз в 6 часов
 
 
 # ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ =================
@@ -1458,11 +1490,10 @@ async def process_work_cmd(message: Message):
     now = datetime.now()
 
     if not last_work:
-        diff_seconds = 7200  # Первичный бонус за 2 часа
+        diff_seconds = 7200
     else:
         diff_seconds = (now - last_work).total_seconds()
 
-    # Минимальный интервал — 2 часа (7200 секунд)
     if diff_seconds < 7200:
         remaining = int(7200 - diff_seconds)
         hours = remaining // 3600
@@ -1539,7 +1570,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"📊 <b>Навигация и команды:</b>\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 👥 <code>стата чата</code> | 📜 <code>правила</code>\n"
         f"👥 <code>список админов</code> — модерация этого чата\n"
-        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code>\n"
+        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code> (ком. 5%)\n"
         f"🚨 <code>репорт</code> (ответом на спам) — жалоба админам"
     )
     await safe_reply(message, text)
@@ -1760,6 +1791,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
     await safe_reply(message, text)
 
 
+# ================= ПЕРЕВОД МОНЕТ С КОМИССИЕЙ 5% =================
 async def process_pay_cmd(message: Message, args: List[str]):
     sender = message.from_user
     if not await check_subscription(sender.id):
@@ -1799,22 +1831,68 @@ async def process_pay_cmd(message: Message, args: List[str]):
         return await safe_reply(message, "❌ Нельзя переводить монеты самому себе!")
 
     amount = resolve_bet_amount(amount_raw, sender_bal)
-    if amount is None or amount <= 0:
-        return await safe_reply(message, "❌ Укажите корректную сумму: <code>перевод 100</code> или <code>перевод вабанк</code>")
+    if amount is None or amount < 100:
+        return await safe_reply(message, "❌ Минимальная сумма перевода: <b>100 💰</b>!")
 
     if sender_bal < amount:
         return await safe_reply(message, f"❌ Недостаточно монет для перевода! Ваш баланс: <code>{fmt_num(sender_bal)} 💰</code>")
+
+    # Комиссия 5% (сжигается)
+    fee = max(1, int(amount * 0.05))
+    received_amount = amount - fee
 
     await db.register_user(sender.id, sender.full_name, sender.username)
     await db.register_user(recipient_id, recipient_name)
 
     await db.change_balance(sender.id, -amount)
-    await db.change_balance(recipient_id, amount)
+    await db.change_balance(recipient_id, received_amount)
 
     await safe_reply(
         message,
-        f"💸 {get_mention(sender.id, sender.full_name)} перевел <b>{fmt_num(amount)} 💰</b> "
-        f"игроку {get_mention(recipient_id, recipient_name)}!"
+        f"💸 {get_mention(sender.id, sender.full_name)} перевёл монеты игроку {get_mention(recipient_id, recipient_name)}!\n\n"
+        f"💵 <b>Сумма перевода:</b> <code>{fmt_num(amount)} 💰</code>\n"
+        f"🔥 <b>Комиссия банка (5% сгорело):</b> <code>-{fmt_num(fee)} 💰</code>\n"
+        f"💰 <b>Получатель зачислил:</b> <b>+{fmt_num(received_amount)} 💰</b>"
+    )
+
+
+# ================= СТРОГАЯ КОМАНДА РАССЫЛКИ =================
+@dp.message(F.text.startswith("/broadcast") | F.text.startswith("/рассылка"))
+async def cmd_broadcast_strict(message: Message):
+    if not await db.can_give_money(message.from_user.id):
+        return await safe_reply(message, "❌ Глобальная рассылка доступна только <b>Создателю и Разработчику</b>!")
+
+    parts = message.text.strip().split(maxsplit=1)
+    args_text = parts[1] if len(parts) > 1 else None
+
+    broadcast_text = None
+    if message.reply_to_message:
+        broadcast_text = message.reply_to_message.text or message.reply_to_message.caption
+    elif args_text:
+        broadcast_text = args_text
+
+    if not broadcast_text:
+        return await safe_reply(message, "❌ Формат: <code>/рассылка [текст]</code> или ответом на сообщение.")
+
+    user_ids = await db.get_all_user_ids()
+    status_msg = await message.reply(f"📢 Начинаю рассылку для <b>{len(user_ids)}</b> игроков...", parse_mode="HTML")
+
+    success = 0
+    blocked = 0
+
+    for u_id in user_ids:
+        try:
+            await bot.send_message(chat_id=u_id, text=broadcast_text, parse_mode="HTML")
+            success += 1
+            await asyncio.sleep(0.04)
+        except Exception:
+            blocked += 1
+
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📬 Доставлено: <b>{success}</b>\n"
+        f"🚫 Заблокировали бота / Ошибка: <b>{blocked}</b>",
+        parse_mode="HTML"
     )
 
 
@@ -2083,7 +2161,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["pay", "передать", "перевод"]:
         return await process_pay_cmd(message, args)
 
-    # Выдача монет (Только Разработчик и Создатель. Владелец группы НЕ может)
+    # Выдача монет (Только Разработчик и Создатель бота)
     elif cmd in ["give", "выдать", "начислить", "сет", "set"]:
         if not await db.can_give_money(message.from_user.id):
             return await safe_reply(message, "❌ Функция выдачи монет доступна только <b>Создателю и Разработчику</b> бота (Владелец чата не имеет прав выдавать валюту)!")
@@ -2480,7 +2558,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="work", description="Ферма (сбор раз в 2ч, копится до 24ч) 🌾"),
+        BotCommand(command="work", description="Ферма (раз в 2ч, до 24ч) 🌾"),
         BotCommand(command="sponsor", description="Бонус спонсора (+50k) 📢"),
         BotCommand(command="rules", description="Правила чата 📜"),
         BotCommand(command="admins", description="Администрация этого чата 👥"),
@@ -2496,9 +2574,9 @@ async def on_startup(bot: Bot):
         BotCommand(command="even", description="Чётное число ⚖️"),
         BotCommand(command="odd", description="Нечётное число 🎲"),
         BotCommand(command="profile", description="Мой профиль и баланс 👤"),
-        BotCommand(command="ref", description="Реферальная ссылка (+3%) 🤝"),
+        BotCommand(command="ref", description="Рефералка (+3%) 🤝"),
         BotCommand(command="pay", description="Передать монеты 💸"),
-        BotCommand(command="top", description="Топ богачей 🏆"),
+        BotCommand(command="top", description="Топ игроков 🏆"),
     ]
     try:
         await bot.set_my_commands(commands)
@@ -2506,6 +2584,7 @@ async def on_startup(bot: Bot):
         logging.warning(f"Ошибка регистрации команд: {e}")
 
     asyncio.create_task(quiz_background_worker())
+    asyncio.create_task(db_cleanup_background_worker())
 
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
