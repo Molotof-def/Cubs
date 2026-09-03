@@ -71,14 +71,14 @@ MOTIVATIONAL_QUOTES = [
 ]
 
 WORK_TASKS = [
-    "доставил ценный груз заказчику",
-    "собрал урожай на криптоферме",
-    "выиграл киберспортивный турнир",
+    "доставил секретный груз заказчику",
+    "завершил крупный фриланс-проект",
+    "выиграл престижный турнир по киберспорту",
     "нашёл золотой самородок в заброшенной шахте",
-    "продал редкий 3D-ассет на бирже",
-    "настроил сервера облачного дата-центра",
-    "провёл успешный стрим и собрал донаты",
-    "собрал мощный игровой ПК на заказ"
+    "продал редкий 3D-ассет на маркетплейсе",
+    "починил серверную стойку дата-центра",
+    "провёл успешный стрим и собрал кучу донатов",
+    "собрал кастомный игровой ПК под заказ"
 ]
 
 QUIZ_WORDS = [
@@ -819,7 +819,7 @@ async def check_bet_confirmation(message: Message, user_id: int, user_name: str,
             f"⚠️ <b>ВНИМАНИЕ! КРУПНАЯ СТАВКА!</b>\n\n"
             f"👤 Игрок: {get_mention(user_id, user_name)}\n"
             f"💰 Вы ставите <b>{fmt_num(bet)} 💰</b> (более 50% от баланса <code>{fmt_num(user_bal)} 💰</code>).\n\n"
-            f"<i>Подтвердите действие:</i>"
+            f"<i>Подтвердите действие во избежание случайной ставки:</i>"
         )
         await safe_reply(message, text, reply_markup=confirm_bet_keyboard(conf_id))
         return False
@@ -1105,7 +1105,7 @@ async def db_cleanup_background_worker():
             pending_confirmations.clear()
         except Exception as e:
             logging.error(f"Ошибка очистки базы данных: {e}")
-        await asyncio.sleep(21600)  # Раз в 6 часов
+        await asyncio.sleep(21600)
 
 
 # ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ =================
@@ -1474,7 +1474,7 @@ async def cb_sponsor_bonus_claim(call: CallbackQuery):
         pass
 
 
-# ================= ВОРК: ФЕРМА С НАКОПЛЕНИЕМ (РАЗ В 2 ЧАСА) =================
+# ================= ВОРК: НАКОПИТЕЛЬНАЯ РАБОТА (РАЗ В 2 ЧАСА) =================
 async def process_work_cmd(message: Message):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
@@ -1494,6 +1494,7 @@ async def process_work_cmd(message: Message):
     else:
         diff_seconds = (now - last_work).total_seconds()
 
+    # Сбор возможен строго раз в 2 часа (7200 сек)
     if diff_seconds < 7200:
         remaining = int(7200 - diff_seconds)
         hours = remaining // 3600
@@ -1502,16 +1503,16 @@ async def process_work_cmd(message: Message):
         time_left_str = f"{hours} ч. {mins} мин." if hours > 0 else f"{mins} мин. {secs} сек."
         return await safe_reply(
             message,
-            f"⏳ {get_mention(user_id, message.from_user.full_name)}, ваша ферма ещё работает!\n"
-            f"Следующий сбор прибыли через: <b>{time_left_str}</b>\n\n"
-            f"💡 <i>Ферма накопительно приносит доход каждый час (до 24 часов). Чем дольше ждете — тем больше урожай!</i>"
+            f"⏳ {get_mention(user_id, message.from_user.full_name)}, вы недавно закончили смену!\n"
+            f"Следующая зарплата доступна через: <b>{time_left_str}</b>\n\n"
+            f"💼 <i>Зарплата копится каждый час (вплоть до 24 часов). Чем дольше смена — тем выше куш!</i>"
         )
 
     capped_seconds = min(diff_seconds, 86400)
-    hours = capped_seconds / 3600.0
+    accumulated_hours = capped_seconds / 3600.0
 
     rate_per_hour = random.randint(18000, 24000)
-    earned = int(rate_per_hour * hours) + random.randint(5000, 15000)
+    earned = int(rate_per_hour * accumulated_hours) + random.randint(5000, 15000)
     earned = max(35000, min(earned, 580000))
 
     task = random.choice(WORK_TASKS)
@@ -1520,17 +1521,17 @@ async def process_work_cmd(message: Message):
     await db.update_work_time(user_id)
 
     formatted_time = format_duration(int(diff_seconds))
-    is_max = " <i>(Достигнут лимит склада 24ч)</i>" if diff_seconds >= 86400 else ""
+    is_max = " <i>(Достигнут максимум смены 24ч)</i>" if diff_seconds >= 86400 else ""
 
     await safe_reply(
         message,
-        f"🌾 <b>СБОР ПРИБЫЛИ С ФЕРМЫ!</b>\n\n"
-        f"👤 Фермер: {get_mention(user_id, message.from_user.full_name)}\n"
+        f"💼 <b>ЗАРПЛАТА ПОЛУЧЕНА!</b>\n\n"
+        f"👤 Работник: {get_mention(user_id, message.from_user.full_name)}\n"
         f"🛠 Вы успешно {task}!\n"
-        f"⏱ <b>Время накопления:</b> {formatted_time}{is_max}\n"
+        f"⏱ <b>Отработано времени:</b> {formatted_time}{is_max}\n"
         f"💵 Ставка: <code>~{fmt_num(rate_per_hour)} 💰/час</code>\n"
-        f"💰 <b>Итого получено: +{fmt_num(earned)} монет!</b>\n\n"
-        f"⏰ <i>Следующий сбор через 2 часа.</i>"
+        f"💰 <b>Итого начислено: +{fmt_num(earned)} монет!</b>\n\n"
+        f"⏰ <i>Следующая смена доступна через 2 часа.</i>"
     )
 
 
@@ -1553,7 +1554,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💼 <b>Заработок монет:</b>\n"
-        f"├ 🌾 <code>ворк</code> — собрать урожай с фермы (раз в 2ч, до 24ч)\n"
+        f"├ 🛠 <code>ворк</code> — забрать зарплату (раз в 2ч, копится до 24ч)\n"
         f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
         f"🎲 <b>Список игровых режимов:</b>\n"
         f"<blockquote expandable>"
@@ -1996,7 +1997,8 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["sponsor", "sub_bonus", "subbonus", "спонсор"]:
         return await process_sponsor_cmd(message)
 
-    elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "смена", "ферма"]:
+    # Работа / Заработок (ворк)
+    elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "смена"]:
         return await process_work_cmd(message)
 
     elif cmd in ["chatstats", "статачата", "чатстата", "чат"]:
@@ -2558,7 +2560,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="work", description="Ферма (раз в 2ч, до 24ч) 🌾"),
+        BotCommand(command="work", description="Работа (сбор раз в 2ч, копится до 24ч) 💼"),
         BotCommand(command="sponsor", description="Бонус спонсора (+50k) 📢"),
         BotCommand(command="rules", description="Правила чата 📜"),
         BotCommand(command="admins", description="Администрация этого чата 👥"),
