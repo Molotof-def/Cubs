@@ -136,7 +136,7 @@ def report_admin_keyboard(target_id: int):
     return builder.as_markup()
 
 
-def top_menu_keyboard(current_tab: str = "balance"):
+def top_menu_keyboard(current_tab: str = "balance", is_group: bool = False):
     builder = InlineKeyboardBuilder()
     b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
     t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
@@ -147,11 +147,18 @@ def top_menu_keyboard(current_tab: str = "balance"):
     builder.button(text=t_text, callback_data="top_tab_turnover")
     builder.button(text=w_text, callback_data="top_tab_wins")
     builder.button(text=r_text, callback_data="top_tab_winrate")
-    builder.adjust(2, 2)
+    
+    if is_group:
+        m_text = "💬 Сообщения 🟢" if current_tab == "messages" else "💬 Сообщения"
+        builder.button(text=m_text, callback_data="top_tab_messages")
+        builder.adjust(2, 2, 1)
+    else:
+        builder.adjust(2, 2)
+        
     return builder.as_markup()
 
 
-async def get_top_content(tab: str) -> str:
+async def get_top_content(tab: str, chat_id: Optional[int] = None) -> str:
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     
     if tab == "balance":
@@ -173,7 +180,7 @@ async def get_top_content(tab: str) -> str:
         text = title
         for i, r in enumerate(rows, 1):
             place = medals.get(i, f"<b>{i}.</b>")
-            text += f"{place} {html.escape(r['username'] or 'Аноним')} — <code>{fmt_num(r['turnover'])} 💰</code> оборота\n"
+            text += f"{place} {html.escape(r['username'] or 'Аноним')} — <code>{fmt_num(r['turnover'])} 💰</code>\n"
         return text
 
     elif tab == "wins":
@@ -198,6 +205,19 @@ async def get_top_content(tab: str) -> str:
             total = r['wins'] + r['losses'] + r['draws']
             wr = round((r['wins'] / total * 100), 1) if total > 0 else 0
             text += f"{place} {html.escape(r['username'] or 'Аноним')} — <b>{wr}%</b> побед <code>({r['wins']}/{total})</code>\n"
+        return text
+
+    elif tab == "messages":
+        if not chat_id:
+            return "💬 <b>Топ по сообщениям доступен только внутри групп!</b>"
+        rows = await db.get_top_messages(chat_id, 10)
+        title = "💬 <b>ТОП-10 ПО СООБЩЕНИЯМ В ЭТОМ ЧАТЕ:</b>\n\n"
+        if not rows:
+            return title + "<i>В этом чате пока нет активности.</i>"
+        text = title
+        for i, r in enumerate(rows, 1):
+            place = medals.get(i, f"<b>{i}.</b>")
+            text += f"{place} {html.escape(r['username'] or 'Участник')} — <b>{fmt_num(r['msg_count'])}</b> сообщений\n"
         return text
 
     return "🏆 <b>Таблица лидеров</b>"
@@ -376,8 +396,11 @@ class Database:
                 CREATE TABLE IF NOT EXISTS chat_members (
                     chat_id BIGINT,
                     user_id BIGINT,
+                    msg_count BIGINT DEFAULT 0,
                     PRIMARY KEY (chat_id, user_id)
                 );
+
+                ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS msg_count BIGINT DEFAULT 0;
 
                 CREATE TABLE IF NOT EXISTS chat_rules (
                     chat_id BIGINT PRIMARY KEY,
@@ -415,10 +438,30 @@ class Database:
 
             if chat_id:
                 await conn.execute("""
-                    INSERT INTO chat_members (chat_id, user_id)
-                    VALUES ($1, $2)
+                    INSERT INTO chat_members (chat_id, user_id, msg_count)
+                    VALUES ($1, $2, 0)
                     ON CONFLICT (chat_id, user_id) DO NOTHING
                 """, chat_id, user_id)
+
+    async def increment_message_count(self, chat_id: int, user_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO chat_members (chat_id, user_id, msg_count)
+                VALUES ($1, $2, 1)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET 
+                    msg_count = chat_members.msg_count + 1
+            """, chat_id, user_id)
+
+    async def get_top_messages(self, chat_id: int, limit: int = 10):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT u.username, cm.msg_count 
+                FROM chat_members cm
+                JOIN users u ON cm.user_id = u.user_id
+                WHERE cm.chat_id = $1 AND cm.msg_count > 0
+                ORDER BY cm.msg_count DESC
+                LIMIT $2
+            """, chat_id, limit)
 
     async def get_user_id_by_username(self, tg_username: str):
         clean_tag = tg_username.replace("@", "").lower().strip()
@@ -624,21 +667,20 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE active_duels SET status = $1 WHERE duel_id = $2", status, duel_id)
 
-    # Фоновая авто-очистка мусора в БД (удаляет старые дуэли старше 30 минут)
     async def cleanup_expired_data(self):
         async with self.pool.acquire() as conn:
             deleted_duels = await conn.execute("""
                 DELETE FROM active_duels 
                 WHERE created_at < NOW() - INTERVAL '30 minutes'
             """)
-            logging.info(f"🧹 Фоновая очистка БД: удалены устаревшие записи ({deleted_duels}).")
+            logging.info(f"🧹 Фоновая очистка БД: удалены устаревшие дуэли ({deleted_duels}).")
 
 
 db = Database(DATABASE_URL)
 
 
-# ================= АНТИСПАМ И МОДЕРАЦИЯ =================
-class ThrottlingAndModerationMiddleware(BaseMiddleware):
+# ================= АНТИСПАМ И УЧЕТ СООБЩЕНИЙ (БЕЗ БАНА ЗА ССЫЛКИ) =================
+class ThrottlingAndMessageCounterMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
             chat = event.chat
@@ -647,6 +689,7 @@ class ThrottlingAndModerationMiddleware(BaseMiddleware):
             if chat and chat.type in ["group", "supergroup"]:
                 known_groups.add(chat.id)
 
+                # Удаление системных уведомлений о входе/выходе
                 if event.new_chat_members or event.left_chat_member:
                     try:
                         await event.delete()
@@ -654,24 +697,11 @@ class ThrottlingAndModerationMiddleware(BaseMiddleware):
                         pass
                     return
 
-                if event.text and user and not user.is_bot:
-                    has_link = bool(re.search(r"(t\.me\/|https?:\/\/|telegram\.me\/)", event.text, re.IGNORECASE))
-                    if has_link:
-                        is_adm = await db.is_admin(user.id, chat.id)
-                        if not is_adm:
-                            try:
-                                await event.delete()
-                                warns = await db.add_warn(user.id)
-                                if warns >= 3:
-                                    await chat.ban(user_id=user.id)
-                                    await db.reset_warns(user.id)
-                                    await event.answer(f"🛑 {get_mention(user.id, user.full_name)} заблокирован за спам ссылками (3/3 варнов)!", parse_mode="HTML")
-                                else:
-                                    await event.answer(f"⚠️ {get_mention(user.id, user.full_name)}, ссылки запрещены! Варн: <b>{warns}/3</b>", parse_mode="HTML")
-                            except Exception:
-                                pass
-                            return
+                # Подсчет сообщений участников (боты полностью исключены)
+                if user and not user.is_bot:
+                    asyncio.create_task(db.increment_message_count(chat.id, user.id))
 
+        # Троттлинг кликов
         if isinstance(event, (Message, CallbackQuery)) and event.from_user and not event.from_user.is_bot:
             user_id = event.from_user.id
             now = time.time()
@@ -703,11 +733,12 @@ class ThrottlingAndModerationMiddleware(BaseMiddleware):
                     )
                 except Exception:
                     pass
+
         return await handler(event, data)
 
 
-dp.message.outer_middleware(ThrottlingAndModerationMiddleware())
-dp.callback_query.outer_middleware(ThrottlingAndModerationMiddleware())
+dp.message.outer_middleware(ThrottlingAndMessageCounterMiddleware())
+dp.callback_query.outer_middleware(ThrottlingAndMessageCounterMiddleware())
 
 
 # ================= КЛАВИАТУРЫ =================
@@ -819,7 +850,7 @@ async def check_bet_confirmation(message: Message, user_id: int, user_name: str,
             f"⚠️ <b>ВНИМАНИЕ! КРУПНАЯ СТАВКА!</b>\n\n"
             f"👤 Игрок: {get_mention(user_id, user_name)}\n"
             f"💰 Вы ставите <b>{fmt_num(bet)} 💰</b> (более 50% от баланса <code>{fmt_num(user_bal)} 💰</code>).\n\n"
-            f"<i>Подтвердите действие во избежание случайной ставки:</i>"
+            f"<i>Подтвердите действие:</i>"
         )
         await safe_reply(message, text, reply_markup=confirm_bet_keyboard(conf_id))
         return False
@@ -1046,7 +1077,7 @@ async def process_deladmin_cmd(message: Message, args: List[str]):
     await safe_reply(message, f"🚫 {get_mention(target_id, target_name)} снят с должности Администратора этого чата.")
 
 
-# ================= ФОНОВЫЙ ЦИКЛ ВИКТОРИН (СТРОГО ОТ 50 ЧЕЛОВЕК) =================
+# ================= ФОНОВЫЙ ЦИКЛ ВИКТОРИН =================
 async def quiz_background_worker():
     await asyncio.sleep(60)
     while True:
@@ -1212,6 +1243,7 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         await send_game_result(message, "draw", text, user_id=user_id, game_type="dice", bet=bet)
 
 
+# ================= КУБЫ: БЕЗ МЕГА ДУБЛЯ (ЧЕСТНЫЙ x1.9) =================
 async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
     user = await db.get_user(user_id)
     user_bal = user[2] if user else 0
@@ -1238,19 +1270,19 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
     b_sum = b1 + b2
 
     if p_sum > b_sum:
-        is_double = (p1 == p2)
-        mult = 3.0 if is_double else 1.9
+        # Убран мега-дубль: стандартный честный коэффициент x1.9
+        mult = 1.9
         win = int(bet * mult)
 
         await db.change_balance(user_id, win)
         await db.record_game(user_id, "win")
 
-        bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
         res = (
             f"👤 {get_mention(user_id, user_name)}\n"
             f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
             f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
-            f"{bonus_title}💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
+            f"💰 Коэффициент: <b>x1.9</b>\n"
+            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
         )
         await send_game_result(message, "win", res, user_id=user_id, game_type="doubledice", bet=bet)
     elif p_sum < b_sum:
@@ -1494,7 +1526,6 @@ async def process_work_cmd(message: Message):
     else:
         diff_seconds = (now - last_work).total_seconds()
 
-    # Сбор возможен строго раз в 2 часа (7200 сек)
     if diff_seconds < 7200:
         remaining = int(7200 - diff_seconds)
         hours = remaining // 3600
@@ -1561,7 +1592,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека\n"
         f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — 1 кубик против бота\n"
-        f"🎲🎲 <code>кубы [ставка/вабанк]</code> — 2 кубика (х3 за дубль)\n"
+        f"🎲🎲 <code>кубы [ставка/вабанк]</code> — 2 кубика\n"
         f"🚀 <code>лесенка [ставка/вабанк]</code> — Лесенка (до x7.5)\n"
         f"📈 <code>больше [ставка/вабанк]</code> — Числа 4, 5, 6\n"
         f"📉 <code>меньше [ставка/вабанк]</code> — Числа 1, 2, 3\n"
@@ -1616,21 +1647,23 @@ async def process_chat_stats_cmd(message: Message):
     await safe_reply(message, text)
 
 
-# ================= КОМАНДА ТОП С КНОПКАМИ =================
+# ================= КОМАНДА ТОП С КНОПКАМИ И ВКЛАДКОЙ СООБЩЕНИЙ =================
 async def process_top_cmd(message: Message):
     if not await check_subscription(message.from_user.id):
         return await safe_reply(message, "⚠️ <b>Для использования бота необходимо подписаться на наш канал!</b>", reply_markup=sub_keyboard())
 
-    text = await get_top_content("balance")
-    await safe_reply(message, text, reply_markup=top_menu_keyboard("balance"))
+    is_group = message.chat.type in ["group", "supergroup"]
+    text = await get_top_content("balance", message.chat.id if is_group else None)
+    await safe_reply(message, text, reply_markup=top_menu_keyboard("balance", is_group))
 
 
 @dp.callback_query(F.data.startswith("top_tab_"))
 async def cb_top_pagination(call: CallbackQuery):
     tab = call.data.replace("top_tab_", "")
-    text = await get_top_content(tab)
+    is_group = call.message.chat.type in ["group", "supergroup"]
+    text = await get_top_content(tab, call.message.chat.id if is_group else None)
     try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=top_menu_keyboard(tab))
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=top_menu_keyboard(tab, is_group))
     except Exception:
         pass
     await call.answer()
@@ -1838,7 +1871,6 @@ async def process_pay_cmd(message: Message, args: List[str]):
     if sender_bal < amount:
         return await safe_reply(message, f"❌ Недостаточно монет для перевода! Ваш баланс: <code>{fmt_num(sender_bal)} 💰</code>")
 
-    # Комиссия 5% (сжигается)
     fee = max(1, int(amount * 0.05))
     received_amount = amount - fee
 
@@ -1997,7 +2029,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["sponsor", "sub_bonus", "subbonus", "спонсор"]:
         return await process_sponsor_cmd(message)
 
-    # Работа / Заработок (ворк)
+    # Работа (ворк)
     elif cmd in ["work", "работа", "ворк", "заработать", "зарплата", "смена"]:
         return await process_work_cmd(message)
 
@@ -2560,7 +2592,7 @@ async def on_startup(bot: Bot):
     
     commands = [
         BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="work", description="Работа (сбор раз в 2ч, копится до 24ч) 💼"),
+        BotCommand(command="work", description="Работа (раз в 2ч, до 24ч) 💼"),
         BotCommand(command="sponsor", description="Бонус спонсора (+50k) 📢"),
         BotCommand(command="rules", description="Правила чата 📜"),
         BotCommand(command="admins", description="Администрация этого чата 👥"),
