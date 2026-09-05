@@ -38,29 +38,21 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
+# Обязательный канал проекта для работы всех функций
 REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 if "t.me/" in REQUIRED_CHANNEL_RAW:
     REQUIRED_CHANNEL_RAW = "@" + REQUIRED_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQUIRED_CHANNEL_RAW.startswith("-100"):
     REQUIRED_CHANNEL_RAW = f"@{REQUIRED_CHANNEL_RAW}"
-
 REQUIRED_CHANNEL = REQUIRED_CHANNEL_RAW
 
-SPONSOR_CHANNEL_RAW = os.getenv("SPONSOR_CHANNEL", "@chat_giveaways").strip()
+# Канал спонсора за бонус +50к (@GrupaGoev)
+SPONSOR_CHANNEL_RAW = os.getenv("SPONSOR_CHANNEL", "@GrupaGoev").strip()
 if "t.me/" in SPONSOR_CHANNEL_RAW:
     SPONSOR_CHANNEL_RAW = "@" + SPONSOR_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if SPONSOR_CHANNEL_RAW and not SPONSOR_CHANNEL_RAW.startswith("@") and not SPONSOR_CHANNEL_RAW.startswith("-100"):
     SPONSOR_CHANNEL_RAW = f"@{SPONSOR_CHANNEL_RAW}"
-
 SPONSOR_CHANNEL = SPONSOR_CHANNEL_RAW
-
-SPONSOR_CHAT_RAW = os.getenv("SPONSOR_CHAT", "@DuelCubesChat").strip()
-if "t.me/" in SPONSOR_CHAT_RAW:
-    SPONSOR_CHAT_RAW = "@" + SPONSOR_CHAT_RAW.split("t.me/")[-1].strip("/")
-if SPONSOR_CHAT_RAW and not SPONSOR_CHAT_RAW.startswith("@") and not SPONSOR_CHAT_RAW.startswith("-100"):
-    SPONSOR_CHAT_RAW = f"@{SPONSOR_CHAT_RAW}"
-
-SPONSOR_CHAT = SPONSOR_CHAT_RAW
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -121,18 +113,15 @@ def get_mention(user_id: int, name: Optional[str]) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-# ================= УМНЫЙ ПАРСЕР СУММ (3кк, 5к, 2.5млн, вабанк) =================
 def parse_amount_string(val_str: Optional[str], current_balance: int = 0) -> Optional[int]:
     if not val_str:
         return None
     
     clean = val_str.strip().lower().replace(",", ".").replace(" ", "")
-    
     allin_aliases = ["вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", "фул", "макс", "max", "оллин", "all-in"]
     if clean in allin_aliases:
         return max(0, int(current_balance))
 
-    # Регулярка для считывания числа и суффикса (к, кк, ккк, млн, млрд)
     match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zа-яА-Я]*)$", clean)
     if not match:
         return None
@@ -188,6 +177,64 @@ def top_menu_keyboard(current_tab: str = "balance"):
     builder.button(text=r_text, callback_data="top_tab_winrate")
     builder.adjust(2, 2)
     return builder.as_markup()
+
+
+# ================= ТОЧНАЯ ПРОВЕРКА ПОДПИСКИ =================
+async def check_channel_member(user_id: int, channel_target: str) -> bool:
+    if not channel_target or channel_target.lower() in ["none", "null", "", "@none", "@null"]:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=channel_target, user_id=user_id)
+        if isinstance(member, (ChatMemberOwner, ChatMemberAdministrator, ChatMemberMember)):
+            return True
+        if isinstance(member, ChatMemberRestricted):
+            return getattr(member, "is_member", False)
+        status_str = str(getattr(member, "status", "")).lower()
+        return status_str in ["creator", "administrator", "member"]
+    except Exception as e:
+        logging.warning(f"Ошибка точной проверки подписки для {user_id} в {channel_target}: {e}")
+        return False
+
+
+async def check_subscription(user_id: int) -> bool:
+    return await check_channel_member(user_id, REQUIRED_CHANNEL)
+
+
+def sub_keyboard(target_user_id: int):
+    builder = InlineKeyboardBuilder()
+    clean_ch = REQUIRED_CHANNEL.replace("@", "")
+    ch_url = f"https://t.me/{clean_ch}" if not REQUIRED_CHANNEL.startswith("-100") else "https://t.me/"
+    
+    builder.button(text="📢 Подписаться на канал", url=ch_url)
+    # Привязка кнопки к конкретному пользователю
+    builder.button(text="🔄 Проверить подписку", callback_data=f"sub_chk_{target_user_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def sponsor_keyboard(target_user_id: int):
+    builder = InlineKeyboardBuilder()
+    clean_tag = SPONSOR_CHANNEL.replace("@", "")
+    channel_url = f"https://t.me/{clean_tag}" if not SPONSOR_CHANNEL.startswith("-100") else "https://t.me/"
+    builder.button(text=f"📢 Спонсор {SPONSOR_CHANNEL}", url=channel_url)
+    builder.button(text="🎁 Забрать 50 000 💰", callback_data=f"sps_chk_{target_user_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@dp.callback_query(F.data.startswith("sub_chk_"))
+async def cb_recheck_sub(call: CallbackQuery):
+    target_id_str = call.data.replace("sub_chk_", "")
+    if target_id_str.isdigit() and call.from_user.id != int(target_id_str):
+        return await call.answer("❌ Это не ваша кнопка проверки подписки!", show_alert=True)
+
+    if await check_subscription(call.from_user.id):
+        try:
+            await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все функции и игры.", parse_mode="HTML")
+        except Exception:
+            await call.answer("✅ Подписка подтверждена!", show_alert=True)
+    else:
+        await call.answer(f"❌ Вы ещё не подписались на {REQUIRED_CHANNEL}!", show_alert=True)
 
 
 async def get_top_content(tab: str) -> str:
@@ -307,68 +354,6 @@ def format_duration(seconds: int) -> str:
     return f"{seconds} сек."
 
 
-# ================= ПРОВЕРКА ПОДПИСКИ =================
-async def check_channel_member(user_id: int, channel_target: str) -> bool:
-    if not channel_target or channel_target.lower() in ["none", "null", "", "@none", "@null"]:
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id=channel_target, user_id=user_id)
-        if isinstance(member, (ChatMemberOwner, ChatMemberAdministrator, ChatMemberMember)):
-            return True
-        if isinstance(member, ChatMemberRestricted):
-            return getattr(member, "is_member", False)
-        status_str = str(getattr(member, "status", "")).lower()
-        if any(s in status_str for s in ["member", "administrator", "creator"]):
-            return True
-        return False
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "user not found" in err_msg or "participant_id_invalid" in err_msg:
-            return False
-        return True
-
-
-async def check_subscription(user_id: int) -> bool:
-    ch_ok = await check_channel_member(user_id, REQUIRED_CHANNEL)
-    chat_ok = await check_channel_member(user_id, SPONSOR_CHAT)
-    return ch_ok and chat_ok
-
-
-def sub_keyboard():
-    builder = InlineKeyboardBuilder()
-    clean_ch = REQUIRED_CHANNEL.replace("@", "")
-    ch_url = f"https://t.me/{clean_ch}" if not REQUIRED_CHANNEL.startswith("-100") else "https://t.me/"
-    clean_chat = SPONSOR_CHAT.replace("@", "")
-    chat_url = f"https://t.me/{clean_chat}" if not SPONSOR_CHAT.startswith("-100") else "https://t.me/"
-    
-    builder.button(text="📢 Канал проекта", url=ch_url)
-    builder.button(text="💬 Чат спонсора", url=chat_url)
-    builder.button(text="🔄 Проверить подписку", callback_data="sub_check_recheck")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def sponsor_keyboard():
-    builder = InlineKeyboardBuilder()
-    clean_tag = SPONSOR_CHANNEL.replace("@", "")
-    channel_url = f"https://t.me/{clean_tag}" if not SPONSOR_CHANNEL.startswith("-100") else "https://t.me/"
-    builder.button(text="📢 Канал Спонсора", url=channel_url)
-    builder.button(text="🎁 Проверить и забрать 50k", callback_data="chk_sponsor_bonus")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-@dp.callback_query(F.data == "sub_check_recheck")
-async def cb_recheck_sub(call: CallbackQuery):
-    if await check_subscription(call.from_user.id):
-        try:
-            await call.message.edit_text("✅ <b>Подписка подтверждена!</b> Теперь вам доступны все функции и игры.", parse_mode="HTML")
-        except Exception:
-            await call.answer("✅ Подписка подтверждена!", show_alert=True)
-    else:
-        await call.answer("❌ Вы ещё не вступили в наш канал и чат!", show_alert=True)
-
-
 # ================= БАЗА ДАННЫХ =================
 class Database:
     def __init__(self, db_url: str):
@@ -398,9 +383,6 @@ class Database:
                     claimed_promos TEXT[] DEFAULT ARRAY[]::TEXT[],
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_nick TEXT DEFAULT NULL;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_promos TEXT[] DEFAULT ARRAY[]::TEXT[];
 
                 CREATE TABLE IF NOT EXISTS chat_admins (
                     chat_id BIGINT,
@@ -589,7 +571,6 @@ class Database:
             """, chat_id)
             return stats, top_player
 
-    # ================= ПРАВА И РОЛИ =================
     async def is_developer(self, user_id: int) -> bool:
         return user_id == DEV_ID
 
@@ -650,7 +631,6 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET warns = 0 WHERE user_id = $1", user_id)
 
-    # Правила чата
     async def set_rules(self, chat_id: int, rules: str, updated_by: str):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -670,7 +650,6 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM chat_rules WHERE chat_id = $1", chat_id)
 
-    # Дуэли
     async def create_duel(self, duel_id: str, chat_id: int, challenger_id: int, challenger_name: str, opponent_id: int, opponent_name: str, bet: int, comment: str):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -690,7 +669,7 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE active_duels SET status = $1 WHERE duel_id = $2", status, duel_id)
 
-    async def cleanup_expired_data(self):
+    async def cleanup_expired_duels(self):
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 DELETE FROM active_duels 
@@ -701,7 +680,7 @@ class Database:
 db = Database(DATABASE_URL)
 
 
-# ================= АНТИСПАМ, УЧЕТ СООБЩЕНИЙ И ПРИВЕТСТВИЕ =================
+# ================= АНТИСПАМ И ПРИВЕТСТВИЕ =================
 class ChatActivityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
@@ -717,8 +696,8 @@ class ChatActivityMiddleware(BaseMiddleware):
                             mention = get_mention(new_member.id, new_member.full_name)
                             welcome_text = (
                                 f"👋 Добро пожаловать в чат, {mention}!\n\n"
-                                f"🎲 Здесь ты можешь играть в кубики, соревноваться в дуэлях и поднимать монеты.\n"
-                                f"💡 Напиши <code>/start</code> чтобы получить стартовый баланс, или <code>правила</code> для изучения правил чата."
+                                f"🎲 Играй в кубики, соревнуйся в дуэлях и побеждай.\n"
+                                f"💡 Напиши <code>/start</code> для меню или <code>правила</code> для чтения правил."
                             )
                             try:
                                 await event.answer(welcome_text, parse_mode="HTML")
@@ -769,81 +748,6 @@ class ChatActivityMiddleware(BaseMiddleware):
 
 dp.message.outer_middleware(ChatActivityMiddleware())
 dp.callback_query.outer_middleware(ChatActivityMiddleware())
-
-
-# ================= КЛАВИАТУРЫ =================
-def duel_keyboard(duel_id: str):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⚔️ Принять вызов", callback_data=f"ac_{duel_id}")
-    builder.button(text="❌ Отклонить", callback_data=f"dc_{duel_id}")
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-def check_keyboard(check_id: str, remaining: int, total: int):
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🎁 Забрать чек ({remaining}/{total})", callback_data=f"take_chk_{check_id}")
-    return builder.as_markup()
-
-
-LADDER_STEPS = {0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5}
-
-
-def render_ladder(current_step: int) -> str:
-    lines = []
-    for step in range(5, 0, -1):
-        mult = LADDER_STEPS[step]
-        if step == current_step:
-            lines.append(f"🧗 <b>[ Ступень {step} ] ➔ x{mult}</b> 🔥 <i>(Вы здесь)</i>")
-        elif step < current_step:
-            lines.append(f"✅ <s>[ Ступень {step} ] ➔ x{mult}</s>")
-        else:
-            lines.append(f"▫️ [ Ступень {step} ] ➔ x{mult}")
-    return "\n".join(lines)
-
-
-def ladder_keyboard(user_id: int, step: int):
-    builder = InlineKeyboardBuilder()
-    if step < 5:
-        builder.button(text=f"🎲 Шаг вверх (след. x{LADDER_STEPS[step+1]})", callback_data=f"ld_step_{user_id}")
-    if step > 0:
-        builder.button(text=f"💰 Забрать куш (x{LADDER_STEPS[step]})", callback_data=f"ld_cash_{user_id}")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
-async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Optional[int], str, List[str]]:
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user
-        if target.is_bot:
-            return None, target.full_name, args
-        t_data = await db.get_user(target.id)
-        display_name = (t_data[13] if t_data and t_data[13] else target.full_name)
-        return target.id, display_name, args
-
-    if not args:
-        return None, "Пользователь", args
-
-    first_arg = args[0].strip()
-    remaining_args = args[1:]
-
-    if first_arg.isdigit() and len(first_arg) >= 6:
-        t_id = int(first_arg)
-        u_data = await db.get_user(t_id)
-        t_name = (u_data[13] or u_data[1]) if u_data else f"ID {t_id}"
-        return t_id, t_name, remaining_args
-
-    if first_arg.startswith("@"):
-        clean_tag = first_arg.replace("@", "")
-        t_id = await db.get_user_id_by_username(clean_tag)
-        if t_id:
-            u_data = await db.get_user(t_id)
-            t_name = (u_data[13] or u_data[1]) if u_data else f"@{clean_tag}"
-            return t_id, t_name, remaining_args
-        return None, f"@{clean_tag}", remaining_args
-
-    return None, "Пользователь", args
 
 
 # ================= ЗАЩИТА ОТ СЛУЧАЙНЫХ СТАВОК =================
@@ -959,7 +863,7 @@ async def process_admins_list_cmd(message: Message):
     await safe_reply(message, text)
 
 
-# ================= СИСТЕМА НИКОВ (КАК В IRIS) =================
+# ================= СИСТЕМА НИКОВ =================
 async def process_nick_cmd(message: Message, new_nick: str):
     user_id = message.from_user.id
     clean_nick = new_nick.strip()
@@ -1026,7 +930,7 @@ async def process_top_messages_cmd(message: Message):
 # ================= ИГРОВОЙ ТОП =================
 async def process_top_cmd(message: Message):
     if not await check_subscription(message.from_user.id):
-        return await safe_reply(message, "⚠️ <b>Для использования бота необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
 
     text = await get_top_content("balance")
     await safe_reply(message, text, reply_markup=top_menu_keyboard("balance"))
@@ -1231,17 +1135,16 @@ async def quiz_background_worker():
             await asyncio.sleep(60)
 
 
-# ================= ФОНОВАЯ ОЧИСТКА БАЗЫ ДАННЫХ =================
+# ================= ФОНОВАЯ ОЧИСТКА БАЗЫ ДАННЫХ (БЕССРОЧНЫЕ ЧЕКИ НЕ ТРОГАЕМ) =================
 async def db_cleanup_background_worker():
     await asyncio.sleep(120)
     while True:
         try:
-            await db.cleanup_expired_data()
-            active_checks.clear()
+            await db.cleanup_expired_duels()
             pending_confirmations.clear()
         except Exception as e:
             logging.error(f"Ошибка очистки базы данных: {e}")
-        await asyncio.sleep(21600)
+        await asyncio.sleep(7200)
 
 
 # ================= АВТОМАТИЧЕСКИЙ ТАЙМАУТ ЛЕСЕНКИ =================
@@ -1281,7 +1184,7 @@ async def ladder_timeout_watcher(user_id: int, message_obj: Message):
         pass
 
 
-# ================= ФОНОВЫЙ ТАЙМАУТ ДУЭЛИ (РОVНО 2 МИНУТЫ) =================
+# ================= ФОНОВЫЙ ТАЙМАУТ ДУЭЛИ (2 МИНУТЫ) =================
 async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
     try:
         await asyncio.sleep(120)
@@ -1289,7 +1192,7 @@ async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
         if duel and duel["status"] == "pending":
             await db.delete_duel(duel_id)
             try:
-                await duel_msg.edit_text("⌛ <b>Время ожидания дуэли истекло (2 мин). Игра автоматически отменена, деньги возвращены!</b>", parse_mode="HTML")
+                await duel_msg.edit_text("⌛ <b>Время ожидания дуэли истекло (2 мин). Игра автоматически отменена, деньги на месте!</b>", parse_mode="HTML")
             except Exception:
                 pass
     except asyncio.CancelledError:
@@ -1349,7 +1252,6 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         await send_game_result(message, "draw", text, user_id=user_id, game_type="dice", bet=bet)
 
 
-# ================= КУБЫ: С РЕДКИМ МЕГА-ДУБЛЕМ (x3.0 ПРИ ДУБЛЕ) =================
 async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
     user = await db.get_user(user_id)
     user_bal = user[2] if user else 0
@@ -1377,7 +1279,6 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
     b_sum = b1 + b2
 
     if p_sum > b_sum:
-        # Редкий случай: чистый дубль даёт x3.0!
         is_double = (p1 == p2)
         mult = 3.0 if is_double else 1.9
         win = int(bet * mult)
@@ -1462,14 +1363,14 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
         await send_game_result(message, "loss", res, user_id=user_id, game_type=game_type, bet=bet)
 
 
-# ================= СИСТЕМА ЧЕКОВ В ЧАТАХ =================
+# ================= БЕССРОЧНЫЕ ЧЕКИ В ЧАТАХ =================
 async def process_create_check_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
     if message.chat.type not in ["group", "supergroup"]:
         return await safe_reply(message, "❌ Раздачи чеков работают только в группах!")
 
     if not await check_subscription(user_id):
-        return await safe_reply(message, "⚠️ <b>Необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для создания чека необходимо подписаться на канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
 
     if len(args) < 2:
         return await safe_reply(message, "❌ Формат: <code>чек [общая_сумма] [кол-во_человек]</code>\n<i>Пример:</i> <code>чек 50к 5</code>")
@@ -1501,6 +1402,7 @@ async def process_create_check_cmd(message: Message, args: List[str]):
     amount_per_user = total_amount // activations
     display_name = user[13] or message.from_user.full_name
 
+    # Бессрочный чек: живёт до тех пор, пока не закончатся активации
     active_checks[check_id] = {
         "creator_id": user_id,
         "creator_name": display_name,
@@ -1517,7 +1419,7 @@ async def process_create_check_cmd(message: Message, args: List[str]):
         f"💰 Общий банк: <b>{fmt_num(total_amount)} 💰</b>\n"
         f"💵 Каждый получит: <b>+{fmt_num(amount_per_user)} 💰</b>\n"
         f"👥 Осталось мест: <b>{activations}/{activations}</b>\n\n"
-        f"<i>Нажмите кнопку ниже, чтобы забрать монеты!</i>"
+        f"<i>Нажмите кнопку ниже, чтобы забрать монеты! (Чек бессрочный)</i>"
     )
     await safe_reply(message, text, reply_markup=check_keyboard(check_id, activations, activations))
 
@@ -1528,7 +1430,7 @@ async def cb_take_check(call: CallbackQuery):
     user_id = call.from_user.id
 
     if check_id not in active_checks:
-        return await call.answer("❌ Этот чек уже закончился или недействителен!", show_alert=True)
+        return await call.answer("❌ Этот чек уже полностью разобран!", show_alert=True)
 
     chk = active_checks[check_id]
 
@@ -1539,7 +1441,7 @@ async def cb_take_check(call: CallbackQuery):
         return await call.answer("❌ Вы уже активировали этот чек!", show_alert=True)
 
     if not await check_subscription(user_id):
-        return await call.answer("⚠️ Сначала подпишитесь на канал и чат проекта!", show_alert=True)
+        return await call.answer(f"⚠️ Сначала подпишитесь на обязательный канал {REQUIRED_CHANNEL}!", show_alert=True)
 
     chk["claimed_users"].add(user_id)
     chk["remaining_activations"] -= 1
@@ -1567,7 +1469,7 @@ async def cb_take_check(call: CallbackQuery):
             pass
 
 
-# ================= БОНУС СПОНСОРА =================
+# ================= БОНУС СПОНСОРА (@GrupaGoev) =================
 async def process_sponsor_cmd(message: Message):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
@@ -1578,19 +1480,23 @@ async def process_sponsor_cmd(message: Message):
 
     claimed = user[10]
     if claimed:
-        return await safe_reply(message, "✅ <b>Вы уже получали бонус за подписку на спонсора (+50 000 💰)!</b>")
+        return await safe_reply(message, "✅ <b>Вы уже забирали бонус за подписку на спонсора (+50 000 💰)!</b>")
 
     text = (
         f"📢 <b>БОНУС ЗА ПОДПИСКУ НА СПОНСОРА!</b>\n\n"
-        f"Подпишитесь на канал спонсора <b>{SPONSOR_CHANNEL}</b> и получите разовый бонус:\n"
+        f"Подпишитесь на нашего спонсора <b>{SPONSOR_CHANNEL}</b> и получите подарок:\n"
         f"💰 <b>+50 000 монет на баланс!</b>\n\n"
-        f"<i>После подписки нажмите кнопку проверки ниже.</i>"
+        f"<i>После подписки нажмите кнопку ниже:</i>"
     )
-    await safe_reply(message, text, reply_markup=sponsor_keyboard())
+    await safe_reply(message, text, reply_markup=sponsor_keyboard(user_id))
 
 
-@dp.callback_query(F.data == "chk_sponsor_bonus")
+@dp.callback_query(F.data.startswith("sps_chk_"))
 async def cb_sponsor_bonus_claim(call: CallbackQuery):
+    target_id_str = call.data.replace("sps_chk_", "")
+    if target_id_str.isdigit() and call.from_user.id != int(target_id_str):
+        return await call.answer("❌ Это не ваша кнопка проверки спонсора!", show_alert=True)
+
     user_id = call.from_user.id
     user = await db.get_user(user_id)
     if not user:
@@ -1626,7 +1532,7 @@ async def process_work_cmd(message: Message):
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
 
     if not await check_subscription(user_id):
-        return await safe_reply(message, "⚠️ <b>Для работы необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для работы необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
 
     user = await db.get_user(user_id)
     if not user:
@@ -1707,7 +1613,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
         f"🎲 <b>Список игровых режимов:</b>\n"
         f"<blockquote expandable>"
-        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека (поддержка 50к, 1кк)\n"
+        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека (бессрочный)\n"
         f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1\n"
         f"🎲 <code>кубик [ставка/3кк/вабанк]</code> — 1 кубик против бота\n"
         f"🎲🎲 <code>кубы [ставка/3кк/вабанк]</code> — 2 кубика (х3.0 за дубль!)\n"
@@ -1731,7 +1637,7 @@ async def process_chat_stats_cmd(message: Message):
         return await safe_reply(message, "❌ Статистика чата доступна только в группах!")
 
     if not await check_subscription(message.from_user.id):
-        return await safe_reply(message, "⚠️ <b>Для использования бота необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для использования бота необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
 
     await db.register_user(
         message.from_user.id,
@@ -1765,13 +1671,13 @@ async def process_chat_stats_cmd(message: Message):
     await safe_reply(message, text)
 
 
-# ================= ДУЭЛЬ С АВТООТМЕНОЙ ЧЕРЕЗ 2 МИНУТЫ =================
+# ================= ДУЭЛЬ =================
 async def process_duel_cmd(message: Message, args: List[str]):
     challenger = message.from_user
     await db.register_user(challenger.id, challenger.full_name, challenger.username)
 
     if not await check_subscription(challenger.id):
-        return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(challenger.id))
 
     target_id, target_name = None, None
     bet_raw = None
@@ -1862,7 +1768,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
         f"🔵 Оппонент: {get_mention(target_id, target_name)}\n"
         f"💰 Ставка: <b>{fmt_num(bet)} 💰</b> (Приз: <b>+{fmt_num(int(bet * 1.9))} 💰</b>)\n"
         f"{comment_text}\n"
-        f"⏱ <i>У оппонента 2 минуты на принятие (иначе авто-отмена без комиссии).</i>"
+        f"⏱ <i>У оппонента 2 минуты на принятие (иначе авто-отмена).</i>"
     )
 
     duel_msg = await message.reply(text, reply_markup=duel_keyboard(duel_id), parse_mode="HTML")
@@ -1871,7 +1777,7 @@ async def process_duel_cmd(message: Message, args: List[str]):
 
 async def process_profile_cmd(message: Message, args: List[str]):
     if not await check_subscription(message.from_user.id):
-        return await safe_reply(message, "⚠️ <b>Для использования бота необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для использования бота необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
 
     if len(args) > 1:
         return
@@ -1924,11 +1830,11 @@ async def process_profile_cmd(message: Message, args: List[str]):
     await safe_reply(message, text)
 
 
-# ================= ПЕРЕВОД МОНЕТ С КОМИССИЕЙ 5% (ПОДДЕРЖКА 3кк, 500к) =================
+# ================= ПЕРЕВОД МОНЕТ С КОМИССИЕЙ 5% =================
 async def process_pay_cmd(message: Message, args: List[str]):
     sender = message.from_user
     if not await check_subscription(sender.id):
-        return await safe_reply(message, "⚠️ <b>Для выполнения переводов необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+        return await safe_reply(message, f"⚠️ <b>Для переводов необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(sender.id))
 
     sender_data = await db.get_user(sender.id)
     sender_bal = sender_data[2] if sender_data else 0
@@ -2135,7 +2041,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2188,7 +2094,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2204,7 +2110,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         if user_id in active_ladders:
             return await safe_reply(message, "❌ У вас уже начата игра в Лесенку! Завершите её.")
         user = await db.get_user(user_id)
@@ -2245,7 +2151,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2261,7 +2167,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2277,7 +2183,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2293,7 +2199,7 @@ async def handle_all_text_commands(message: Message):
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
         if not await check_subscription(user_id):
-            return await safe_reply(message, "⚠️ <b>Для игры необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
         user = await db.get_user(user_id)
         user_bal = user[2] if user else 0
         display_name = (user[13] or message.from_user.full_name) if user else message.from_user.full_name
@@ -2309,7 +2215,7 @@ async def handle_all_text_commands(message: Message):
         return await process_profile_cmd(message, args)
     elif cmd in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
         if not await check_subscription(message.from_user.id):
-            return await safe_reply(message, "⚠️ <b>Необходимо подписаться на наш канал и чат!</b>", reply_markup=sub_keyboard())
+            return await safe_reply(message, f"⚠️ <b>Необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
         me = await bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
         ref_count = await db.get_referrals_count(message.from_user.id)
@@ -2325,7 +2231,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["pay", "передать", "перевод"]:
         return await process_pay_cmd(message, args)
 
-    # Выдача монет (Только Разработчик и Создатель бота, поддержка 3кк / 1млн)
+    # Выдача монет (Только Разработчик и Создатель бота)
     elif cmd in ["give", "выдать", "начислить", "сет", "set"]:
         if not await db.can_give_money(message.from_user.id):
             return await safe_reply(message, "❌ Функция выдачи монет доступна только <b>Создателю и Разработчику</b> бота!")
@@ -2351,7 +2257,6 @@ async def handle_all_text_commands(message: Message):
         if not target_id or not amount_raw:
             return await safe_reply(message, "❌ Формат: <code>/give 3кк @username</code> или <code>выдать 100к</code> ответом на сообщение.")
 
-        # Парсим с поддержкой отрицательных и сокращенных значений
         is_negative = amount_raw.startswith("-")
         clean_amount_str = amount_raw.lstrip("-")
         amount = parse_amount_string(clean_amount_str, 0)
@@ -2470,7 +2375,7 @@ async def handle_all_text_commands(message: Message):
 @dp.callback_query(F.data.startswith("rep_"))
 async def cb_quick_replay(call: CallbackQuery):
     if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал и чат для игры!", show_alert=True)
+        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
 
     parts = call.data.split("_")
     if len(parts) < 4:
@@ -2525,7 +2430,7 @@ async def cb_accept_duel(call: CallbackQuery):
     c_id, o_id, bet = duel["challenger_id"], duel["opponent_id"], int(duel["bet"])
 
     if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Сначала подпишитесь на канал и чат!", show_alert=True)
+        return await call.answer(f"⚠️ Сначала подпишитесь на канал {REQUIRED_CHANNEL}!", show_alert=True)
 
     c_data = await db.get_user(c_id)
     o_data = await db.get_user(o_id)
@@ -2618,7 +2523,7 @@ async def cb_ladder_step(call: CallbackQuery):
         return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
 
     if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал и чат для игры!", show_alert=True)
+        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
 
     if user_id not in active_ladders:
         return await call.answer("❌ Игра уже завершена!", show_alert=True)
@@ -2698,7 +2603,7 @@ async def cb_ladder_cash(call: CallbackQuery):
         return await call.answer("❌ Это не ваша игра!", show_alert=True)
 
     if not await check_subscription(call.from_user.id):
-        return await call.answer("⚠️ Подпишитесь на канал и чат для игры!", show_alert=True)
+        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
 
     if user_id not in active_ladders:
         return await call.answer("❌ Игра уже завершена!", show_alert=True)
