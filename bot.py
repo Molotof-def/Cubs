@@ -93,27 +93,54 @@ LADDER_STEPS = {
     5: 7.5
 }
 
-# Словарь жёстких RP-действий
+# Расширенная база жёстких RP-действий (45+ штук)
 RP_ACTIONS = {
-    "ударить": ("ударил", "🥊"),
-    "въебать": ("въебал с ноги", "💥"),
+    "ударить": ("жестоко ударил", "🥊"),
+    "въебать": ("въебал с ноги в челюсть", "💥"),
     "уебать": ("уебал с разворота", "💢"),
-    "расстрелять": ("хладнокровно расстрелял", "🔫"),
-    "закопать": ("заживо закопал в землю", "⚰️"),
-    "сжечь": ("облил бензином и сжёг", "🔥"),
-    "повесить": ("повесил на фонарном столбе", "🪢"),
-    "казнить": ("публично казнил", "🪓"),
-    "зарезать": ("хладнокровно зарезал", "🔪"),
-    "пырнуть": ("пырнул заточкой под ребро", "🗡"),
-    "сломать": ("переломал все кости", "🦴"),
-    "обоссать": ("жестоко унизил и обоссал", "💦"),
-    "плюнуть": ("плюнул в лицо", "💦"),
-    "укусить": ("до крови укусил", "🦷"),
-    "отравить": ("подсыпал смертельный яд в стакан", "🧪"),
-    "придушить": ("жестоко придушил", "🩸"),
-    "задушить": ("задушил голыми руками", "🩸"),
-    "нокаутировать": ("отправил в глубокий нокаут", "🥊"),
-    "уничтожить": ("стёр в порошок и уничтожил", "☠️")
+    "ебнуть": ("со всей дури ёбнул", "🔨"),
+    "вломить": ("вломил по печени", "👊"),
+    "расстрелять": ("хладнокровно расстрелял из автомата", "🔫"),
+    "пристрелить": ("пристрелил точным выстрелом в лоб", "🎯"),
+    "закопать": ("заживо закопал на пустыре", "⚰️"),
+    "похоронить": ("торжественно похоронил заживо", "🪦"),
+    "сжечь": ("облил бензином и заживо сжёг", "🔥"),
+    "испепелить": ("испепелил до состояния пепла", "⚡"),
+    "повесить": ("повесил на толстой верёвке", "🪢"),
+    "казнить": ("публично отрубил голову и казнил", "🪓"),
+    "гильотинировать": ("отправил под нож гильотины", "⚔️"),
+    "зарезать": ("хладнокровно перерезал глотку", "🔪"),
+    "пырнуть": ("пырнул ржавой заточкой под ребро", "🗡"),
+    "проткнуть": ("насквозь проткнул копьём", "🔱"),
+    "сломать": ("с хрустом переломал все кости", "🦴"),
+    "переломать": ("в кашу переломал пальцы", "🩼"),
+    "обоссать": ("жестоко унизил и обоссал с ног до головы", "💦"),
+    "плюнуть": ("смачно харкнул в лицо", "💦"),
+    "укусить": ("до мяса прокусил плоть", "🦷"),
+    "отгрызть": ("с мясом отгрыз ухо", "🩸"),
+    "отравить": ("подсыпал смертельную дозу цианида", "🧪"),
+    "придушить": ("жестоко придушил до потери сознания", "🩸"),
+    "задушить": ("хладнокровно задушил голыми руками", "🩸"),
+    "нокаутировать": ("отправил в глубокий и глухой нокаут", "🥊"),
+    "уничтожить": ("стёр в порошок и уничтожил", "☠️"),
+    "растоптать": ("грязными берцами растоптал лицо", "🥾"),
+    "размазать": ("размазал по асфальту", "🩸"),
+    "четвертовать": ("привязал к коням и четвертовал", "🐎"),
+    "выпотрошить": ("вскрыл живот и выпотрошил", "🩸"),
+    "утопить": ("утопил головой в унитазе", "🌊"),
+    "замуровать": ("замуровал живьём в бетонной стене", "🧱"),
+    "сбросить": ("сбросил с крыши небоскрёба", "🏢"),
+    "разорвать": ("разорвал на две части", "💥"),
+    "отпиздить": ("жестоко толпой отпиздил до полусмерти", "🤼"),
+    "выебать": ("морально и физически выебал во все щели", "🔞"),
+    "выебатьвжопу": ("натянул на кукан и смачно выебал", "🔞"),
+    "выебатьврот": ("грубо засунул в рот и кончил", "🔞"),
+    "трахнуть": ("жёстко и без прелюдий трахнул", "🔞"),
+    "отрахать": ("отрахал прямо на глазах у всех", "🔞"),
+    "посадитьнакол": ("медленно насадил на осиновый кол", "🪵"),
+    "отрубитьруку": ("одним взмахом отрубил кисть руки", "🪓"),
+    "скальпировать": ("снял скальп вместе с волосами", "🔪"),
+    "выколотьглаза": ("грязной ложкой выковырял глаза", "👁")
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -365,7 +392,7 @@ async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
         return await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Ошибка HTML-парсера ({e}), отправка текстом...")
+        logging.warning(f"Ошибка HTML-парсера ({e}), отправка обычным текстом...")
         clean_text = re.sub(r'<[^>]+>', '', text)
         return await message.reply(text=clean_text, reply_markup=reply_markup)
 
@@ -870,6 +897,7 @@ async def ladder_timeout_watcher(user_id: int, message_obj: Message):
 
 # ================= ФОНОВЫЕ ВОТЧЕРЫ =================
 async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
+    """Авто-отмена дуэли через 2 минуты без комиссии."""
     try:
         await asyncio.sleep(120)
         duel = await db.get_duel(duel_id)
@@ -884,6 +912,7 @@ async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
 
 
 async def quiz_background_worker():
+    """Викторина раз в 7-8 часов в чатах от 50 человек."""
     await asyncio.sleep(300)
     while True:
         try:
@@ -932,6 +961,7 @@ async def quiz_background_worker():
 
 
 async def db_cleanup_background_worker():
+    """Очистка базы каждые 2 часа."""
     await asyncio.sleep(120)
     while True:
         try:
@@ -1007,16 +1037,46 @@ async def open_chat_cmd(message: Message):
         await safe_reply(message, f"❌ Ошибка: проверьте права бота в чате! ({e})")
 
 
+# ================= БЕЗОТКАЗНЫЙ РЕЗОЛВЕР ДЛЯ RP-КОМАНД =================
+async def resolve_rp_target(message: Message, args: List[str]) -> Tuple[Optional[int], Optional[str]]:
+    # 1. Если ответили реплаем на сообщение человека
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        t_data = await db.get_user(target.id)
+        target_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
+        return target.id, target_name
+
+    # 2. Если написали тег (@username) или ID в тексте
+    if args:
+        target_arg = args[0].strip()
+        if target_arg.startswith("@"):
+            clean_tag = target_arg.replace("@", "")
+            t_id = await db.get_user_id_by_username(clean_tag)
+            if t_id:
+                u_data = await db.get_user(t_id)
+                t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"@{clean_tag}"
+                return t_id, t_name
+            return None, f"@{clean_tag}"
+        elif target_arg.isdigit() and len(target_arg) >= 6:
+            t_id = int(target_arg)
+            u_data = await db.get_user(t_id)
+            t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"ID {t_id}"
+            return t_id, t_name
+
+    return None, None
+
+
 # ================= ЖЕСТКИЕ RP-КОМАНДЫ =================
 async def handle_rp_action(message: Message, cmd_word: str, args: List[str]):
     if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ RP-действия доступны только в беседах!")
+        return await safe_reply(message, "❌ RP-действия доступны только в группах!")
 
-    target_id, target_name, _ = await resolve_target_user(message, args)
-    if not target_id:
-        return await safe_reply(message, "❌ Укажите цель действием: ответом на сообщение или <code>команда @username</code>!")
+    target_id, target_name = await resolve_rp_target(message, args)
 
-    if target_id == message.from_user.id:
+    if not target_id and not target_name:
+        return await safe_reply(message, "❌ Ответьте на сообщение жертвы или укажите <code>@username</code>!")
+
+    if target_id and target_id == message.from_user.id:
         return await safe_reply(message, "❌ Нельзя применять такое на самого себя!")
 
     sender = message.from_user
@@ -1024,7 +1084,8 @@ async def handle_rp_action(message: Message, cmd_word: str, args: List[str]):
     sender_name = (s_data.get("custom_nick") or sender.full_name) if s_data else sender.full_name
 
     verb, emoji = RP_ACTIONS[cmd_word]
-    text = f"{emoji} | {get_mention(sender.id, sender_name)} {verb} {get_mention(target_id, target_name)}"
+    target_mention = get_mention(target_id, target_name) if target_id else target_name
+    text = f"{emoji} | {get_mention(sender.id, sender_name)} {verb} {target_mention}"
     await safe_reply(message, text)
 
 
@@ -1633,9 +1694,21 @@ async def process_profile_cmd(message: Message, args: List[str]):
     if not await check_subscription(message.from_user.id):
         return await safe_reply(message, f"⚠️ <b>Для использования бота необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
 
-    req_user_id = message.from_user.id
-    target_id, target_name, _ = await resolve_target_user(message, args)
-    view_user_id = target_id if target_id else req_user_id
+    # Резолвер цели профиля
+    target_id, target_name = None, None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        target_id = target.id
+        target_name = target.full_name
+    elif args:
+        first_arg = args[0].strip()
+        if first_arg.isdigit() and len(first_arg) >= 6:
+            target_id = int(first_arg)
+        elif first_arg.startswith("@"):
+            clean_tag = first_arg.replace("@", "")
+            target_id = await db.get_user_id_by_username(clean_tag)
+
+    view_user_id = target_id if target_id else message.from_user.id
 
     me = await bot.get_me()
     if view_user_id == me.id:
@@ -1643,7 +1716,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
 
     user = await db.get_user(view_user_id)
     if not user:
-        if view_user_id == req_user_id:
+        if view_user_id == message.from_user.id:
             await db.register_user(view_user_id, message.from_user.full_name, message.from_user.username)
             user = await db.get_user(view_user_id)
         else:
@@ -2410,7 +2483,7 @@ async def handle_all_text_commands(message: Message):
     if not parts:
         return
 
-    first_word = parts[0].lower()
+    first_word = re.sub(r"[^\w]", "", parts[0].lower())
     cmd = first_word.lstrip("/").split("@")[0]
     args = parts[1:]
 
@@ -2508,7 +2581,7 @@ async def handle_all_text_commands(message: Message):
             return await safe_reply(message, "❌ Назначение администраторов доступно только в группах!")
         if not await db.is_creator(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ Назначать администраторов может только <b>Владелец чата</b> или <b>Разработчик</b>!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите игрока: <code>/addadmin @username</code>")
         await db.add_chat_admin(message.chat.id, target_id)
@@ -2519,7 +2592,7 @@ async def handle_all_text_commands(message: Message):
             return await safe_reply(message, "❌ Снятие администраторов доступно только в группах!")
         if not await db.is_creator(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ Снимать администраторов может только <b>Владелец чата</b> или <b>Разработчик</b>!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите игрока: <code>/deladmin @username</code>")
         if target_id == DEV_ID or target_id in CREATOR_IDS:
@@ -2723,7 +2796,7 @@ async def handle_all_text_commands(message: Message):
                     if parse_amount_string(arg, 0) is not None:
                         amount_raw = arg
                     else:
-                        t_id, t_name, _ = await resolve_target_user(message, [arg])
+                        t_id, t_name = await resolve_rp_target(message, [arg])
                         if t_id:
                             target_id, target_name = t_id, t_name
 
@@ -2746,30 +2819,21 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["mute", "мут", "завалить", "замутить"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, rest = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите игрока: <code>/mute 10м @username Спам</code> или ответом на сообщение.")
         if target_id == DEV_ID or target_id in CREATOR_IDS:
             return await safe_reply(message, "❌ Нельзя замутить Создателя или Разработчика!")
         duration_sec = 600
         reason = "Без причины"
-        if rest:
-            match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", rest[0].strip().lower())
-            if match:
-                val = int(match.group(1))
-                unit = match.group(2)
-                if not unit or unit in ["м", "m", "мин", "min"]:
-                    duration_sec = val * 60
-                elif unit in ["с", "s", "сек"]:
-                    duration_sec = val
-                elif unit in ["ч", "h", "час", "часа"]:
-                    duration_sec = val * 3600
-                elif unit in ["д", "d", "день", "дня"]:
-                    duration_sec = val * 86400
-                if len(rest) > 1:
-                    reason = " ".join(rest[1:])
+        if args:
+            parsed = parse_time_string(args[0])
+            if parsed is not None:
+                duration_sec = max(30, parsed)
+                if len(args) > 1:
+                    reason = " ".join(args[1:])
             else:
-                reason = " ".join(rest)
+                reason = " ".join(args)
         try:
             until = datetime.now() + timedelta(seconds=duration_sec)
             await message.chat.restrict(user_id=target_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
@@ -2780,7 +2844,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["unmute", "размут", "снятьмут"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите пользователя: <code>/unmute @username</code> или ответом на сообщение.")
         try:
@@ -2800,7 +2864,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["ban", "бан", "забанить", "кик", "kick"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Использование: <code>/ban @username</code> или ответом на сообщение.")
         if target_id == DEV_ID or target_id in CREATOR_IDS:
@@ -2814,7 +2878,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["unban", "разбан", "снятьбан"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Использование: <code>/unban @username</code> или <code>/unban 12345678</code>")
         try:
@@ -2826,7 +2890,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["warn", "варн", "пред", "предупреждение"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите игрока: <code>/warn @username</code> или ответом на сообщение.")
         if target_id == DEV_ID or target_id in CREATOR_IDS:
@@ -2846,7 +2910,7 @@ async def handle_all_text_commands(message: Message):
     elif cmd in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
         if not await db.is_admin(message.from_user.id, message.chat.id):
             return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name, _ = await resolve_target_user(message, args)
+        target_id, target_name = await resolve_rp_target(message, args)
         if not target_id:
             return await safe_reply(message, "❌ Укажите игрока: <code>/unwarn @username</code> или ответом на сообщение.")
         await db.reset_warns(target_id)
@@ -2889,7 +2953,7 @@ async def on_startup(bot: Bot):
     except Exception as e:
         logging.warning(f"Ошибка регистрации команд в Telegram API: {e}")
 
-    # Запуск фоновых воркеров
+    # Запуск фоновых воркеров строго после готовности базы данных
     asyncio.create_task(quiz_background_worker())
     asyncio.create_task(db_cleanup_background_worker())
 
