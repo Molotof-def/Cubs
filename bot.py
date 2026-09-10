@@ -7,7 +7,7 @@ import re
 import random
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 import asyncpg
 from aiohttp import web
@@ -26,65 +26,79 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# ================= КОНФИГУРАЦИЯ =================
+# ================= КОНФИГУРАЦИЯ И ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     exit("❌ ОШИБКА: Токен бота не найден в переменных окружения (BOT_TOKEN)!")
 
-DEV_ID = 5103088337         # Главный разработчик
-CREATOR_IDS = {2053035323}    # Создатель бота
+# Иерархия прав доступа к боту
+DEV_ID: int = 5103088337             # Главный разработчик
+CREATOR_IDS: set = {2053035323}      # Создатель бота
 
+# База данных PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     exit("❌ ОШИБКА: DATABASE_URL не найден! Добавьте подключение к PostgreSQL.")
 
+# Обязательный канал для игровых режимов
 REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@DuelCubesChannel").strip()
 if "t.me/" in REQUIRED_CHANNEL_RAW:
     REQUIRED_CHANNEL_RAW = "@" + REQUIRED_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if REQUIRED_CHANNEL_RAW and not REQUIRED_CHANNEL_RAW.startswith("@") and not REQUIRED_CHANNEL_RAW.startswith("-100"):
     REQUIRED_CHANNEL_RAW = f"@{REQUIRED_CHANNEL_RAW}"
-REQUIRED_CHANNEL = REQUIRED_CHANNEL_RAW
+REQUIRED_CHANNEL: str = REQUIRED_CHANNEL_RAW
 
+# Канал спонсора за бонус +50 000 монет
 SPONSOR_CHANNEL_RAW = os.getenv("SPONSOR_CHANNEL", "@GrupaGoev").strip()
 if "t.me/" in SPONSOR_CHANNEL_RAW:
     SPONSOR_CHANNEL_RAW = "@" + SPONSOR_CHANNEL_RAW.split("t.me/")[-1].strip("/")
 if SPONSOR_CHANNEL_RAW and not SPONSOR_CHANNEL_RAW.startswith("@") and not SPONSOR_CHANNEL_RAW.startswith("-100"):
     SPONSOR_CHANNEL_RAW = f"@{SPONSOR_CHANNEL_RAW}"
-SPONSOR_CHANNEL = SPONSOR_CHANNEL_RAW
+SPONSOR_CHANNEL: str = SPONSOR_CHANNEL_RAW
 
+# Сетевые параметры вебхука для хостинга Render
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
-PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_PATH = "/webhook"
+PORT: int = int(os.getenv("PORT", 8080))
+WEBHOOK_PATH: str = "/webhook"
 
-IMG_WIN = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.jpg"
-IMG_LOSS = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.jpg"
-IMG_DRAW = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/draw.jpg"
+# Картинки для исходов игр
+IMG_WIN: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.jpg"
+IMG_LOSS: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.jpg"
+IMG_DRAW: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/draw.jpg"
 
-MOTIVATIONAL_QUOTES = [
+# Цитаты поддержки игрокам при серии из 3+ проигрышей подряд
+MOTIVATIONAL_QUOTES: List[str] = [
     "🔥 <i>«Тот, кто никогда не падал, никогда не поднимался. Сделай паузу и верни своё!»</i>",
     "💪 <i>«Серия неудач — это лишь разбег перед крупным триумфом. Главное — холодная голова.»</i>",
     "🛡 <i>«Опыт строится на ошибках. Кубики переменчивы, но мастерство остаётся!»</i>",
     "⚡ <i>«Фортуна любит терпеливых. Удача обязательно вернется в следующем раунде!»</i>",
-    "🧠 <i>«Не поддавайся тильту! Поставь правильную цель, распредели банк и забери куш.»</i>"
+    "🧠 <i>«Не поддавайся тильту! Поставь правильную цель, распредели банк и забери куш.»</i>",
+    "🎯 <i>«Сделай глубокий вдох. Каждый проигрыш приближает тебя к грандиозному джекпоту!»</i>"
 ]
 
-WORK_TASKS = [
-    "доставил секретный груз заказчику на бронированном фургоне",
-    "завершил сложный фриланс-проект по веб-разработке",
-    "выиграл престижный турнир по киберспорту с крупным призовым",
-    "нашёл золотой самородок в заброшенной шахте на окраине",
-    "продал редкий 3D-ассет на международном маркетплейсе",
-    "починил серверную стойку дата-центра под высокой нагрузкой",
-    "провёл круглосуточный стрим и собрал кучу донатов",
-    "собрал мощный кастомный игровой ПК под заказ клиента"
+# Варианты работы для команды ворк
+WORK_TASKS: List[str] = [
+    "доставил секретный военный груз заказчику на бронированном фургоне",
+    "завершил сложный высоконагруженный фриланс-проект по разработке",
+    "выиграл международный киберспортивный турнир по CS с крупным призовым",
+    "нашёл редкий золотой самородок в заброшенной горной шахте",
+    "продал кастомный 3D-ассет персонажа на международном маркетплейсе",
+    "починил упавшую серверную стойку дата-центра прямо под DDoS-атакой",
+    "провёл круглосуточный благотворительный стрим и собрал море донатов",
+    "собрал топовый кастомный игровой компьютер с водяным охлаждением под заказ",
+    "написал прибыльного торгового бота для криптобиржи и зафиксировал профит",
+    "успешно защитил корпоративную сеть банка от спланированного взлома"
 ]
 
-QUIZ_WORDS = [
+# Слова для викторины
+QUIZ_WORDS: List[str] = [
     "кубики", "джекпот", "дуэль", "победитель", "лесенка",
-    "фортуна", "азарт", "баланс", "богач", "крипта", "монеты"
+    "фортуна", "азарт", "баланс", "богач", "крипта", "монеты",
+    "сервер", "рандом", "ставка", "рулетка", "бонус", "выигрыш"
 ]
 
-LADDER_STEPS = {
+# Множители кубической лесенки
+LADDER_STEPS: Dict[int, float] = {
     0: 1.0,
     1: 1.3,
     2: 1.8,
@@ -94,7 +108,7 @@ LADDER_STEPS = {
 }
 
 # Жёсткие RP-действия
-RP_ACTIONS = {
+RP_ACTIONS: Dict[str, Tuple[str, str]] = {
     "ударить": ("жестоко ударил", "🥊"),
     "въебать": ("въебал с ноги в челюсть", "💥"),
     "уебать": ("уебал с разворота", "💢"),
@@ -111,26 +125,26 @@ RP_ACTIONS = {
     "гильотинировать": ("отправил под нож гильотины", "⚔️"),
     "зарезать": ("хладнокровно перерезал глотку", "🔪"),
     "пырнуть": ("пырнул ржавой заточкой под ребро", "🗡"),
-    "проткнуть": ("насквозь проткнул копьём", "🔱"),
+    "проткнуть": ("насквозь проткнул боевым копьём", "🔱"),
     "сломать": ("с хрустом переломал все кости", "🦴"),
     "переломать": ("в кашу переломал пальцы", "🩼"),
     "обоссать": ("жестоко унизил и обоссал с ног до головы", "💦"),
-    "плюнуть": ("смачно харкнул в лицо", "💦"),
+    "плюнуть": ("смачно харкнул прямо в лицо", "💦"),
     "укусить": ("до мяса прокусил плоть", "🦷"),
     "отгрызть": ("с мясом отгрыз ухо", "🩸"),
     "отравить": ("подсыпал смертельную дозу цианида", "🧪"),
     "придушить": ("жестоко придушил до потери сознания", "🩸"),
     "задушить": ("хладнокровно задушил голыми руками", "🩸"),
     "нокаутировать": ("отправил в глубокий и глухой нокаут", "🥊"),
-    "уничтожить": ("стёр в порошок и уничтожил", "☠️"),
+    "уничтожить": ("стёр в порошок и полностью уничтожил", "☠️"),
     "растоптать": ("грязными берцами растоптал лицо", "🥾"),
-    "размазать": ("размазал по асфальту", "🩸"),
+    "размазать": ("размазал тонким слоем по асфальту", "🩸"),
     "четвертовать": ("привязал к коням и четвертовал", "🐎"),
     "выпотрошить": ("вскрыл живот и выпотрошил", "🩸"),
     "утопить": ("утопил головой в унитазе", "🌊"),
     "замуровать": ("замуровал живьём в бетонной стене", "🧱"),
-    "сбросить": ("сбросил с крыши небоскрёба", "🏢"),
-    "разорвать": ("разорвал на две части", "💥"),
+    "сбросить": ("сбросил вниз с крыши небоскрёба", "🏢"),
+    "разорвать": ("разорвал на куски", "💥"),
     "отпиздить": ("жестоко отпиздил до полусмерти", "🤼"),
     "выебать": ("морально и физически выебал во все щели", "🔞"),
     "выебатьвжопу": ("натянул на кукан и смачно выебал", "🔞"),
@@ -147,7 +161,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилища в оперативной памяти
+# Оперативные хранилища в ОЗУ
 active_ladders: Dict[int, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_quizzes: Dict[int, dict] = {}
@@ -160,7 +174,8 @@ check_cooldowns: Dict[int, float] = {}
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =================
-def fmt_num(val) -> str:
+def fmt_num(val: Any) -> str:
+    """Форматирование чисел с разделителями разрядов."""
     try:
         clean_int = int(round(float(val)))
         return f"{clean_int:,}".replace(",", " ")
@@ -169,16 +184,24 @@ def fmt_num(val) -> str:
 
 
 def get_mention(user_id: int, name: Optional[str]) -> str:
-    safe_name = html.escape(name or "Игрок")
+    """Генерация безопасной HTML-ссылки на профиль."""
+    safe_name = html.escape(str(name or "Игрок"))
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
-def parse_amount_string(val_str: Optional[str], current_balance: int = 0) -> Optional[int]:
+def parse_amount_string(val_str: Optional[Any], current_balance: int = 0) -> Optional[int]:
+    """Парсинг сумм с поддержкой всех суффиксов и синонимов ва-банка."""
     if val_str is None:
         return None
     
     clean = str(val_str).strip().lower().replace(",", ".").replace(" ", "")
-    allin_aliases = ["вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", "фул", "макс", "max", "оллин", "all-in"]
+    if not clean:
+        return None
+
+    allin_aliases = [
+        "вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", 
+        "фул", "макс", "max", "оллин", "all-in", "вабанком", "фуллом"
+    ]
     if clean in allin_aliases:
         return max(0, int(current_balance))
 
@@ -186,23 +209,27 @@ def parse_amount_string(val_str: Optional[str], current_balance: int = 0) -> Opt
     if not match:
         return None
 
-    num_part = float(match.group(1))
-    suffix = match.group(2)
+    try:
+        num_part = float(match.group(1))
+        suffix = match.group(2)
 
-    if not suffix:
-        return int(num_part)
-    elif suffix in ["к", "k", "тыс", "тысяч", "тысячи", "тыща"]:
-        return int(num_part * 1_000)
-    elif suffix in ["кк", "kk", "м", "m", "млн", "миллион", "миллиона", "миллионов", "лям", "ляма", "лямов"]:
-        return int(num_part * 1_000_000)
-    elif suffix in ["ккк", "kkk", "b", "млрд", "миллиард", "миллиарда", "миллиардов"]:
-        return int(num_part * 1_000_000_000)
+        if not suffix:
+            return int(num_part)
+        elif suffix in ["к", "k", "тыс", "тысяч", "тысячи", "тыща"]:
+            return int(num_part * 1_000)
+        elif suffix in ["кк", "kk", "м", "m", "млн", "миллион", "миллиона", "миллионов", "лям", "ляма", "лямов"]:
+            return int(num_part * 1_000_000)
+        elif suffix in ["ккк", "kkk", "b", "млрд", "миллиард", "миллиарда", "миллиардов"]:
+            return int(num_part * 1_000_000_000)
+    except Exception:
+        return None
     
     return None
 
 
 def parse_time_string(time_str: str) -> Optional[int]:
-    match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", time_str.strip().lower())
+    """Парсер времени для модерации."""
+    match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", str(time_str).strip().lower())
     if not match:
         return None
     value = int(match.group(1))
@@ -221,6 +248,7 @@ def parse_time_string(time_str: str) -> Optional[int]:
 
 
 def format_duration(seconds: int) -> str:
+    """Человекопонятное представление времени."""
     if seconds >= 86400:
         days = seconds // 86400
         return f"{days} дн."
@@ -234,6 +262,7 @@ def format_duration(seconds: int) -> str:
 
 
 def render_ladder(current_step: int) -> str:
+    """Отрисовка ступеней кубической лесенки."""
     lines = []
     for step in range(5, 0, -1):
         mult = LADDER_STEPS[step]
@@ -255,8 +284,8 @@ def start_private_keyboard(bot_username: str):
 
 def admin_dashboard_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Обновить", callback_data="adm_refresh_stats")
-    builder.button(text="📢 Рассылка", callback_data="adm_broadcast_help")
+    builder.button(text="🔄 Обновить сводку", callback_data="adm_refresh_stats")
+    builder.button(text="📢 Инструкция рассылки", callback_data="adm_broadcast_help")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -401,7 +430,7 @@ async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
         return await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Ошибка HTML-парсера ({e}), отправка текстом...")
+        logging.warning(f"Ошибка HTML-парсера ({e}), отправка обычным текстом...")
         clean_text = re.sub(r'<[^>]+>', '', text)
         return await message.reply(text=clean_text, reply_markup=reply_markup)
 
@@ -449,13 +478,14 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url
-        self.pool = None
+        self.pool: Optional[asyncpg.Pool] = None
 
     async def init(self):
         clean_url = self.db_url.replace("postgres://", "postgresql://", 1)
         self.pool = await asyncpg.create_pool(dsn=clean_url)
 
         async with self.pool.acquire() as conn:
+            # Основная таблица пользователей
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -474,9 +504,11 @@ class Database:
                 );
             """)
 
+            # Безопасное добавление полей при миграции
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_nick TEXT DEFAULT NULL;")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_promos TEXT[] DEFAULT ARRAY[]::TEXT[];")
 
+            # Локальные администраторы чатов
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_admins (
                     chat_id BIGINT,
@@ -485,6 +517,7 @@ class Database:
                 );
             """)
 
+            # Участники чатов
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_members (
                     chat_id BIGINT,
@@ -492,10 +525,10 @@ class Database:
                     PRIMARY KEY (chat_id, user_id)
                 );
             """)
-
             await conn.execute("ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS msg_count BIGINT DEFAULT 0;")
             await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_members_chat_user ON chat_members (chat_id, user_id);")
 
+            # Настройки чатов (RP команды и т.д.)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_settings (
                     chat_id BIGINT PRIMARY KEY,
@@ -503,6 +536,7 @@ class Database:
                 );
             """)
 
+            # Логи сообщений по времени
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_messages_log (
                     id BIGSERIAL PRIMARY KEY,
@@ -513,6 +547,7 @@ class Database:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_log_chat_time ON chat_messages_log (chat_id, created_at);")
 
+            # Правила групп
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_rules (
                     chat_id BIGINT PRIMARY KEY,
@@ -522,6 +557,7 @@ class Database:
                 );
             """)
 
+            # Активные дуэли
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS active_duels (
                     duel_id TEXT PRIMARY KEY,
@@ -654,6 +690,11 @@ class Database:
             rows = await conn.fetch("SELECT user_id FROM users")
             return [r["user_id"] for r in rows]
 
+    async def get_all_chat_ids(self) -> List[int]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT DISTINCT chat_id FROM chat_members WHERE chat_id < 0")
+            return [r["chat_id"] for r in rows]
+
     async def get_user(self, user_id: int):
         if not self.pool:
             return None
@@ -684,6 +725,7 @@ class Database:
             await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", int(amount), user_id)
 
     async def transfer_money_transaction(self, sender_id: int, recipient_id: int, amount: int, received_amount: int) -> bool:
+        """Атомарный перевод средств между игроками с блокировкой строк FOR UPDATE."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 s_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1 FOR UPDATE", sender_id)
@@ -702,7 +744,7 @@ class Database:
             total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
             total_balance = await conn.fetchval("SELECT COALESCE(SUM(balance), 0) FROM users") or 0
             total_turnover = await conn.fetchval("SELECT COALESCE(SUM(turnover), 0) FROM users") or 0
-            total_chats = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM chat_members") or 0
+            total_chats = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM chat_members WHERE chat_id < 0") or 0
             
             games_data = await conn.fetchrow("""
                 SELECT COALESCE(SUM(wins), 0) as total_wins,
@@ -716,7 +758,7 @@ class Database:
             """)
             
             top_chat_row = await conn.fetchrow("""
-                SELECT chat_id, COUNT(user_id) as u_count FROM chat_members GROUP BY chat_id ORDER BY u_count DESC LIMIT 1
+                SELECT chat_id, COUNT(user_id) as u_count FROM chat_members WHERE chat_id < 0 GROUP BY chat_id ORDER BY u_count DESC LIMIT 1
             """)
             
             return {
@@ -936,6 +978,7 @@ db = Database(DATABASE_URL)
 
 # ================= АВТО-ВОЗВРАТ ЛЕСЕНКИ (3 МИНУТЫ) =================
 async def ladder_timeout_watcher(user_id: int, message_obj: Message):
+    """При неактивности или сбое кубика авто-сохраняет выигрыш или возвращает ставку."""
     try:
         await asyncio.sleep(180)
         if user_id in active_ladders:
@@ -980,6 +1023,7 @@ async def ladder_timeout_watcher(user_id: int, message_obj: Message):
 
 # ================= ФОНОВЫЕ ВОТЧЕРЫ =================
 async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
+    """Авто-отмена дуэли через 2 минуты без комиссии."""
     try:
         await asyncio.sleep(120)
         duel = await db.get_duel(duel_id)
@@ -994,6 +1038,7 @@ async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
 
 
 async def quiz_background_worker():
+    """Викторина раз в 7-8 часов в группах от 50 человек."""
     await asyncio.sleep(300)
     while True:
         try:
@@ -1042,13 +1087,14 @@ async def quiz_background_worker():
 
 
 async def db_cleanup_background_worker():
+    """Фоновая очистка старых дуэлей и логов."""
     await asyncio.sleep(120)
     while True:
         try:
             await db.cleanup_expired_duels()
             pending_confirmations.clear()
         except Exception as e:
-            logging.error(f"Ошибка фонового клинера базы: {e}")
+            logging.error(f"Ошибка фонового клинера: {e}")
         await asyncio.sleep(7200)
 
 
@@ -1122,2003 +1168,6 @@ dp.message.outer_middleware(ChatActivityMiddleware())
 dp.callback_query.outer_middleware(ChatActivityMiddleware())
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЙ РЕЗОЛВЕР ПОЛЬЗОВАТЕЛЕЙ =================
-async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Optional[int], str, List[str]]:
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user
-        if target.is_bot:
-            return None, target.full_name, args
-        t_data = await db.get_user(target.id)
-        display_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
-        return target.id, display_name, args
-
-    if not args:
-        return None, "Пользователь", args
-
-    first_arg = args[0].strip()
-    remaining_args = args[1:]
-
-    if first_arg.isdigit() and len(first_arg) >= 6:
-        t_id = int(first_arg)
-        u_data = await db.get_user(t_id)
-        t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"ID {t_id}"
-        return t_id, t_name, remaining_args
-
-    if first_arg.startswith("@"):
-        clean_tag = first_arg.replace("@", "")
-        t_id = await db.get_user_id_by_username(clean_tag)
-        if t_id:
-            u_data = await db.get_user(t_id)
-            t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"@{clean_tag}"
-            return t_id, t_name, remaining_args
-        return None, f"@{clean_tag}", remaining_args
-
-    return None, "Пользователь", args
-
-
-async def resolve_rp_target(message: Message, args: List[str]) -> Tuple[Optional[int], Optional[str]]:
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user
-        t_data = await db.get_user(target.id)
-        target_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
-        return target.id, target_name
-
-    if args:
-        target_arg = args[0].strip()
-        if target_arg.startswith("@"):
-            clean_tag = target_arg.replace("@", "")
-            t_id = await db.get_user_id_by_username(clean_tag)
-            if t_id:
-                u_data = await db.get_user(t_id)
-                t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"@{clean_tag}"
-                return t_id, t_name
-            return None, f"@{clean_tag}"
-        elif target_arg.isdigit() and len(target_arg) >= 6:
-            t_id = int(target_arg)
-            u_data = await db.get_user(t_id)
-            t_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"ID {t_id}"
-            return t_id, t_name
-
-    return None, None
-
-
-# ================= ЗАЩИТА КРУПНЫХ СТАВОК =================
-async def check_bet_confirmation(message: Message, user_id: int, user_name: str, bet: int, game_type: str, direct_callback) -> bool:
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    if user_bal < bet:
-        await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
-        return False
-
-    if (bet >= 500000 or (user_bal > 0 and bet >= int(user_bal * 0.5))) and bet > 1000:
-        conf_id = uuid.uuid4().hex[:8]
-        pending_confirmations[conf_id] = {
-            "user_id": user_id,
-            "user_name": user_name,
-            "bet": bet,
-            "game_type": game_type,
-            "handler": direct_callback,
-            "message": message
-        }
-
-        text = (
-            f"⚠️ <b>ВНИМАНИЕ! КРУПНАЯ СТАВКА!</b>\n\n"
-            f"👤 Игрок: {get_mention(user_id, user_name)}\n"
-            f"💰 Вы ставите <b>{fmt_num(bet)} 💰</b> (более 50% от баланса <code>{fmt_num(user_bal)} 💰</code>).\n\n"
-            f"<i>Подтвердите действие:</i>"
-        )
-        await safe_reply(message, text, reply_markup=confirm_bet_keyboard(conf_id))
-        return False
-
-    return True
-
-
-@dp.callback_query(F.data.startswith("conf_ok_"))
-async def cb_confirm_ok(call: CallbackQuery):
-    conf_id = call.data.replace("conf_ok_", "")
-    if conf_id not in pending_confirmations:
-        return await call.answer("❌ Запрос устарел или уже выполнен!", show_alert=True)
-
-    data = pending_confirmations.pop(conf_id)
-    if call.from_user.id != data["user_id"]:
-        return await call.answer("❌ Это не ваша ставка!", show_alert=True)
-
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-
-    handler = data["handler"]
-    await handler(data["message"], data["user_id"], data["user_name"], data["bet"])
-
-
-@dp.callback_query(F.data.startswith("conf_no_"))
-async def cb_confirm_no(call: CallbackQuery):
-    conf_id = call.data.replace("conf_no_", "")
-    if conf_id not in pending_confirmations:
-        return await call.answer("❌ Запрос уже отменен!", show_alert=True)
-
-    data = pending_confirmations.pop(conf_id)
-    if call.from_user.id != data["user_id"]:
-        return await call.answer("❌ Это не ваша ставка!", show_alert=True)
-
-    try:
-        await call.message.edit_text("🚫 <b>Ставка была отменена игроком.</b>", parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer("Отменено.")
-
-
-# ================= УПРАВЛЕНИЕ ДОСТУПОМ В ЧАТ =================
-async def close_chat_cmd(message: Message):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Команда доступна только в группах!")
-
-    if not await db.is_admin(message.from_user.id, message.chat.id):
-        return await safe_reply(message, "❌ У вас нет прав администратора для закрытия чата!")
-
-    try:
-        locked_perms = ChatPermissions(
-            can_send_messages=False,
-            can_send_audios=False,
-            can_send_documents=False,
-            can_send_photos=False,
-            can_send_videos=False,
-            can_send_video_notes=False,
-            can_send_voice_notes=False,
-            can_send_polls=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False
-        )
-        await bot.set_chat_permissions(chat_id=message.chat.id, permissions=locked_perms)
-        await safe_reply(
-            message,
-            "🔒 <b>ЧАТ УСПЕШНО ЗАКРЫТ (-чат)!</b>\n\n"
-            "<i>Отправка сообщений временно заблокирована для всех участников, кроме администрации.</i>"
-        )
-    except Exception as e:
-        await safe_reply(message, f"❌ Ошибка: проверьте права бота! ({e})")
-
-
-async def open_chat_cmd(message: Message):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Команда доступна только в группах!")
-
-    if not await db.is_admin(message.from_user.id, message.chat.id):
-        return await safe_reply(message, "❌ У вас нет прав администратора для открытия чата!")
-
-    try:
-        unlocked_perms = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_invite_users=True
-        )
-        await bot.set_chat_permissions(chat_id=message.chat.id, permissions=unlocked_perms)
-        await safe_reply(
-            message,
-            "🔓 <b>ЧАТ УСПЕШНО ОТКРЫТ (+чат)!</b>\n\n"
-            "<i>Всем участникам снова разрешено общаться и играть в кубики.</i>"
-        )
-    except Exception as e:
-        await safe_reply(message, f"❌ Ошибка: проверьте права бота в чате! ({e})")
-
-
-# ================= ЖЁСТКИЕ RP-КОМАНДЫ =================
-async def handle_rp_action(message: Message, cmd_word: str, args: List[str]):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ RP-действия доступны только в группах!")
-
-    if not await db.is_rp_enabled(message.chat.id):
-        return await safe_reply(message, "🔇 <b>RP-команды в этом чате выключены администрацией (-рп).</b>")
-
-    target_id, target_name = await resolve_rp_target(message, args)
-
-    if not target_id and not target_name:
-        return await safe_reply(message, "❌ Ответьте на сообщение жертвы или укажите <code>@username</code>!")
-
-    if target_id and target_id == message.from_user.id:
-        return await safe_reply(message, "❌ Нельзя применять такое на самого себя!")
-
-    sender = message.from_user
-    s_data = await db.get_user(sender.id)
-    sender_name = (s_data.get("custom_nick") or sender.full_name) if s_data else sender.full_name
-
-    verb, emoji = RP_ACTIONS[cmd_word]
-    target_mention = get_mention(target_id, target_name) if target_id else target_name
-    text = f"{emoji} | {get_mention(sender.id, sender_name)} {verb} {target_mention}"
-    await safe_reply(message, text)
-
-
-# ================= РЕЖИМ ЛЕСЕНКИ =================
-async def run_ladder_game(message: Message, user_id: int, display_name: str, bet: int):
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    if user_id in active_ladders:
-        return await safe_reply(message, "❌ У вас уже начата игра в Лесенку! Завершите её.")
-
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
-
-    timeout_task = asyncio.create_task(ladder_timeout_watcher(user_id, message))
-    active_ladders[user_id] = {
-        "user_id": user_id,
-        "bet": bet,
-        "step": 0,
-        "is_rolling": False,
-        "task": timeout_task
-    }
-
-    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
-    text = (
-        f"🚀 <b>КУБИЧЕСКАЯ ЛЕСЕНКА</b>\n\n"
-        f"{is_allin}"
-        f"👤 Игрок: {get_mention(user_id, display_name)}\n"
-        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b>\n"
-        f"⏱ <i>Таймаут неактивности / зависания: 3 минуты (авто-сохранение)</i>\n\n"
-        f"{render_ladder(0)}\n\n"
-        f"🎲 <i>Правила: кубик 3, 4, 5, 6 — подъём наверх (+множитель). 1 или 2 — падение и сгорание ставки!</i>"
-    )
-    await safe_reply(message, text, reply_markup=ladder_keyboard(user_id, 0))
-
-
-@dp.callback_query(F.data.startswith("ld_step_"))
-async def cb_ladder_step(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_step_", ""))
-    except ValueError:
-        return await call.answer()
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра в лесенку!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена или время истекло!", show_alert=True)
-
-    game = active_ladders[user_id]
-    if game.get("is_rolling"):
-        return await call.answer("⏳ Кубик уже брошен, подождите результат!", show_alert=False)
-
-    game["is_rolling"] = True
-    await call.answer()
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    u_data = await db.get_user(user_id)
-    display_name = (u_data.get("custom_nick") or call.from_user.full_name) if u_data else call.from_user.full_name
-
-    await call.message.answer(f"🎲 Бросок кубика для подъема {get_mention(user_id, display_name)}:", parse_mode="HTML")
-    dice_msg = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    val = int(dice_msg.dice.value)
-
-    if val in [1, 2]:
-        bet = game["bet"]
-        if "task" in game and not game["task"].done():
-            game["task"].cancel()
-        del active_ladders[user_id]
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
-
-        res = (
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"🎲 Выпало число: [ <b>{val}</b> ] (Осечка 1-2)\n"
-            f"📉 Ставка сгорела: <b>-{fmt_num(bet)} 💰</b>"
-        )
-        return await send_game_result(call.message, "loss", res, user_id=user_id)
-
-    game["step"] += 1
-    game["is_rolling"] = False
-    step = game["step"]
-    mult = LADDER_STEPS[step]
-
-    if step >= 5:
-        win = int(game["bet"] * mult)
-        if "task" in game and not game["task"].done():
-            game["task"].cancel()
-        del active_ladders[user_id]
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-
-        res = (
-            f"👑 <b>ВЕРШИНА ПОКОРЕНА! ВЫ ПРОШЛИ ВСЮ ЛЕСЕНКУ!</b>\n\n"
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"🎲 Выпало: [ <b>{val}</b> ]\n"
-            f"{render_ladder(5)}\n\n"
-            f"🔥 Максимальный множитель: <b>x{mult}</b>\n"
-            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        )
-        return await send_game_result(call.message, "win", res, user_id=user_id)
-
-    current_win = int(game["bet"] * mult)
-    res = (
-        f"🧗 <b>УСПЕШНЫЙ ШАГ ВВЕРХ!</b>\n\n"
-        f"👤 {get_mention(user_id, display_name)}\n"
-        f"🎲 Выпало: [ <b>{val}</b> ]\n\n"
-        f"{render_ladder(step)}\n\n"
-        f"📈 Множитель: <b>x{mult}</b> (Куш: <b>{fmt_num(current_win)} 💰</b>)"
-    )
-    await call.message.answer(res, reply_markup=ladder_keyboard(user_id, step), parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("ld_cash_"))
-async def cb_ladder_cash(call: CallbackQuery):
-    try:
-        user_id = int(call.data.replace("ld_cash_", ""))
-    except ValueError:
-        return await call.answer()
-
-    if call.from_user.id != user_id:
-        return await call.answer("❌ Это не ваша игра!", show_alert=True)
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
-
-    if user_id not in active_ladders:
-        return await call.answer("❌ Игра уже завершена!", show_alert=True)
-
-    await call.answer()
-    game = active_ladders.pop(user_id, None)
-    if not game:
-        return
-
-    mult = LADDER_STEPS[game["step"]]
-    win = int(game["bet"] * mult)
-
-    if "task" in game and not game["task"].done():
-        game["task"].cancel()
-
-    await db.change_balance(user_id, win)
-    await db.record_game(user_id, "win")
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    u_data = await db.get_user(user_id)
-    display_name = (u_data.get("custom_nick") or call.from_user.full_name) if u_data else call.from_user.full_name
-
-    res = (
-        f"👤 {get_mention(user_id, display_name)}\n"
-        f"🧗 Остановлено на: <b>Ступень {game['step']}</b>\n"
-        f"📈 Зафиксирован множитель: <b>x{mult}</b>\n"
-        f"💵 На баланс зачислено: <b>+{fmt_num(win)} 💰</b>"
-    )
-    await send_game_result(call.message, "win", res, user_id=user_id)
-
-
-# ================= КНОПКИ ДУЭЛИ =================
-@dp.callback_query(F.data.startswith("ac_"))
-async def cb_accept_duel(call: CallbackQuery):
-    duel_id = call.data.replace("ac_", "")
-    duel = await db.get_duel(duel_id)
-    if not duel:
-        return await call.answer("❌ Дуэль не найдена или уже завершилась!", show_alert=True)
-
-    if call.from_user.id != duel["opponent_id"]:
-        return await call.answer("❌ Этот вызов брошен не вам!", show_alert=True)
-
-    if duel["status"] != "pending":
-        return await call.answer("Дуэль уже началась!", show_alert=True)
-
-    c_id, o_id, bet = duel["challenger_id"], duel["opponent_id"], int(duel["bet"])
-
-    if not await check_subscription(call.from_user.id):
-        return await call.answer(f"⚠️ Сначала подпишитесь на канал {REQUIRED_CHANNEL}!", show_alert=True)
-
-    c_data = await db.get_user(c_id)
-    o_data = await db.get_user(o_id)
-
-    if not c_data or not o_data or c_data["balance"] < bet or o_data["balance"] < bet:
-        await db.delete_duel(duel_id)
-        try:
-            await call.message.edit_text("❌ <b>Дуэль отменена: у одного из игроков недостаточно монет!</b>", parse_mode="HTML")
-        except Exception:
-            pass
-        return await call.answer("Недостаточно средств у игроков!", show_alert=True)
-
-    await db.update_duel_status(duel_id, "in_progress")
-    await db.change_balance(c_id, -bet)
-    await db.change_balance(o_id, -bet)
-    await db.add_turnover(c_id, bet)
-    await db.add_turnover(o_id, bet)
-
-    await call.answer("⚔️ Вызов принят!")
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.edit_text(f"⚔️ <b>Дуэль началась!</b> Ставка: <b>{fmt_num(bet)} 💰</b>", parse_mode="HTML")
-    except Exception:
-        pass
-
-    await call.message.answer(f"🔴 Бросает {get_mention(c_id, duel['challenger_name'])}:", parse_mode="HTML")
-    c_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    c_val = int(c_dice.dice.value)
-
-    await call.message.answer(f"🔵 Бросает {get_mention(o_id, duel['opponent_name'])}:", parse_mode="HTML")
-    o_dice = await call.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    o_val = int(o_dice.dice.value)
-
-    win_sum = int(bet * 1.9)
-
-    if c_val > o_val:
-        await db.change_balance(c_id, win_sum)
-        await db.record_game(c_id, "win")
-        await db.record_game(o_id, "loss")
-        await db.process_referral_loss(o_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=c_id)
-    elif o_val > c_val:
-        await db.change_balance(o_id, win_sum)
-        await db.record_game(o_id, "win")
-        await db.record_game(c_id, "loss")
-        await db.process_referral_loss(c_id, bet)
-        res = f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {get_mention(o_id, duel['opponent_name'])} ({o_val})\n💀 <b>ПРОИГРАВШИЙ:</b> {get_mention(c_id, duel['challenger_name'])} ({c_val}) [ -{fmt_num(bet)} 💰 ]\n\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
-        await send_game_result(call.message, "win", res, user_id=o_id)
-    else:
-        await db.change_balance(c_id, bet)
-        await db.change_balance(o_id, bet)
-        await db.record_game(c_id, "draw")
-        await db.record_game(o_id, "draw")
-        res = f"🎲 Счёт: <b>{c_val} = {o_val}</b>\n💰 Ставки возвращены (+{fmt_num(bet)} 💰 каждому)."
-        await send_game_result(call.message, "draw", res)
-
-    await db.delete_duel(duel_id)
-
-
-@dp.callback_query(F.data.startswith("dc_"))
-async def cb_decline_duel(call: CallbackQuery):
-    duel_id = call.data.replace("dc_", "")
-    duel = await db.get_duel(duel_id)
-    if not duel:
-        return await call.answer("❌ Дуэль уже неактивна!", show_alert=True)
-
-    if call.from_user.id not in [duel["opponent_id"], duel["challenger_id"]]:
-        return await call.answer("❌ Вы не участвуете в этой дуэли!", show_alert=True)
-
-    await db.delete_duel(duel_id)
-    try:
-        await call.message.edit_text("❌ <b>Дуэль была отклонена.</b>", parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer("Дуэль отклонена.")
-
-
-# ================= РЕВАНШ =================
-@dp.callback_query(F.data.startswith("rep_"))
-async def cb_quick_replay(call: CallbackQuery):
-    if not await check_subscription(call.from_user.id):
-        return await call.answer(f"⚠️ Подпишитесь на канал {REQUIRED_CHANNEL} для игры!", show_alert=True)
-
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        return await call.answer("❌ Ошибка параметров!", show_alert=True)
-    
-    game_type = parts[1]
-    try:
-        bet = int(parts[2])
-        allowed_user_id = int(parts[3])
-    except ValueError:
-        return await call.answer("❌ Ошибка данных ставки!", show_alert=True)
-
-    if call.from_user.id != allowed_user_id:
-        return await call.answer("❌ Это не ваша кнопка реванша!", show_alert=True)
-
-    user_id = call.from_user.id
-    user_name = call.from_user.full_name
-    username = call.from_user.username
-
-    await db.register_user(user_id, user_name, username)
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-    display_name = user.get("custom_nick") or user_name
-
-    if user_bal < 100:
-        return await call.answer(f"❌ Недостаточно монет! Баланс: {fmt_num(user_bal)} 💰\nНапишите ворк!", show_alert=True)
-
-    actual_bet = min(bet, user_bal)
-    await call.answer()
-
-    if game_type == "dice":
-        await run_dice_game(call.message, user_id, display_name, actual_bet)
-    elif game_type == "doubledice":
-        await run_doubledice_game(call.message, user_id, display_name, actual_bet)
-    elif game_type in ["over", "under", "even", "odd"]:
-        await run_simple_bet_game(call.message, user_id, display_name, actual_bet, game_type)
-
-
-# ================= СПИСОК АДМИНИСТРАЦИИ =================
-async def process_admins_list_cmd(message: Message):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Список администраторов доступен только в группах!")
-
-    chat_id = message.chat.id
-    assigned_admin_ids = await db.get_chat_assigned_admins(chat_id)
-    admins_dict = {}
-
-    try:
-        tg_admins = await bot.get_chat_administrators(chat_id)
-        for adm in tg_admins:
-            u = adm.user
-            if u.is_bot or u.id == DEV_ID or u.id in CREATOR_IDS:
-                continue
-            role = "👑 Владелец чата" if isinstance(adm, ChatMemberOwner) else "🛡 Администратор"
-            admins_dict[u.id] = (u.full_name, role)
-    except Exception:
-        pass
-
-    for a_id in assigned_admin_ids:
-        if a_id == DEV_ID or a_id in CREATOR_IDS:
-            continue
-        if a_id not in admins_dict:
-            u_data = await db.get_user(a_id)
-            name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"ID {a_id}"
-            admins_dict[a_id] = (name, "🛡 Модератор чата")
-
-    if not admins_dict:
-        return await safe_reply(message, "👥 В этом чате пока нет назначенных администраторов.")
-
-    lines = []
-    for a_id, (name, role) in admins_dict.items():
-        lines.append(f"• {role}: {get_mention(a_id, name)} [<code>{a_id}</code>]")
-
-    text = (
-        f"👥 <b>АДМИНИСТРАЦИЯ ЧАТА «{html.escape(message.chat.title or 'Группа')}»</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(lines) +
-        f"\n━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Всего в штате чата: {len(admins_dict)} чел.</i>"
-    )
-    await safe_reply(message, text)
-
-
-# ================= СИСТЕМА НИКОВ =================
-async def process_nick_cmd(message: Message, new_nick: str):
-    user_id = message.from_user.id
-    clean_nick = new_nick.strip()
-
-    if not clean_nick:
-        return await safe_reply(message, "❌ Укажите желаемый ник: <code>ник [имя]</code>\n<i>Пример:</i> <code>ник Дракон</code>")
-
-    if len(clean_nick) > 24:
-        return await safe_reply(message, "❌ Максимальная длина ника — 24 символа!")
-
-    clean_nick = re.sub(r"[\r\n\t]", " ", clean_nick)
-    clean_nick = html.escape(clean_nick)
-
-    await db.set_custom_nick(user_id, clean_nick)
-    await safe_reply(message, f"✅ Ваш ник успешно изменен на: {get_mention(user_id, clean_nick)}")
-
-
-async def process_reset_nick_cmd(message: Message):
-    user_id = message.from_user.id
-    await db.set_custom_nick(user_id, None)
-    await safe_reply(message, f"✅ Ваш ник сброшен к исходному: {get_mention(user_id, message.from_user.full_name)}")
-
-
-# ================= ПРОМОКОДЫ =================
-async def process_promo_cmd(message: Message, promo_code: str):
-    user_id = message.from_user.id
-    code_clean = promo_code.strip().upper()
-
-    if not code_clean:
-        return await safe_reply(message, "❌ Укажите промокод: <code>промик [код]</code>")
-
-    if code_clean == "MUSORDROP":
-        success = await db.claim_promo(user_id, "MUSORDROP", 50000)
-        if success:
-            await safe_reply(message, f"🎉 <b>ПРОМОКОД АКТИВИРОВАН!</b>\nВам начислено: <b>+50 000 монет</b> 💰 на баланс!")
-        else:
-            await safe_reply(message, "❌ Вы уже активировали промокод <b>MUSORDROP</b> ранее!")
-    else:
-        await safe_reply(message, "❌ Такого промокода не существует или он истек.")
-
-
-# ================= СТАТИСТИКА СООБЩЕНИЙ ПО ПЕРИОДАМ =================
-async def render_top_messages_text(chat_id: int, period: str = "all", chat_title: str = "Группа") -> str:
-    rows, period_count, total_count = await db.get_messages_stats(chat_id, period=period, limit=10)
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-
-    period_labels = {
-        "day": "за сегодня (24ч)",
-        "week": "за неделю (7 дней)",
-        "month": "за месяц (30 дней)",
-        "all": "за всё время"
-    }
-
-    label = period_labels.get(period, "за всё время")
-    
-    text = (
-        f"💬 <b>ТОП ПО СООБЩЕНИЯМ {label.upper()}</b>\n"
-        f"👥 Чат: <b>{html.escape(chat_title)}</b>\n"
-        f"📊 Сообщений за период: <b>{fmt_num(period_count)}</b>\n"
-        f"🌐 Всего сообщений в чате: <b>{fmt_num(total_count)}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-    )
-
-    if not rows:
-        text += "<i>За этот период сообщений ещё не было.</i>"
-        return text
-
-    for i, r in enumerate(rows, 1):
-        place = medals.get(i, f"<b>{i}.</b>")
-        display_name = r.get("custom_nick") or r.get("username") or "Участник"
-        count = r["cnt"]
-        text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{fmt_num(count)}</b> сообщений\n"
-
-    return text
-
-
-async def process_top_messages_cmd(message: Message):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Топ по сообщениям доступен только внутри групп!")
-
-    chat_id = message.chat.id
-    chat_title = message.chat.title or "Группа"
-    text = await render_top_messages_text(chat_id, period="all", chat_title=chat_title)
-    await safe_reply(message, text, reply_markup=top_messages_keyboard(chat_id, current_period="all"))
-
-
-@dp.callback_query(F.data.startswith("tmsg_"))
-async def cb_top_messages_period(call: CallbackQuery):
-    parts = call.data.split("_")
-    if len(parts) < 3:
-        return await call.answer()
-
-    chat_id = int(parts[1])
-    period = parts[2]
-    chat_title = call.message.chat.title or "Группа"
-
-    text = await render_top_messages_text(chat_id, period=period, chat_title=chat_title)
-    try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=top_messages_keyboard(chat_id, current_period=period))
-    except Exception:
-        pass
-    await call.answer()
-
-
-# ================= ИГРОВОЙ ТОП =================
-async def process_top_cmd(message: Message):
-    if not await check_subscription(message.from_user.id):
-        return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
-
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    rows = await db.get_top_custom("balance", 10)
-    title = "🏆 <b>ТОП-10 БОГАЧЕЙ (ПО БАЛАНСУ):</b>\n\n"
-    if not rows:
-        text = title + "<i>Список пуст.</i>"
-    else:
-        text = title
-        for i, r in enumerate(rows, 1):
-            place = medals.get(i, f"<b>{i}.</b>")
-            display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-            text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['balance'])} 💰</code>\n"
-
-    await safe_reply(message, text, reply_markup=top_menu_keyboard("balance"))
-
-
-@dp.callback_query(F.data.startswith("top_tab_"))
-async def cb_top_pagination(call: CallbackQuery):
-    tab = call.data.replace("top_tab_", "")
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-
-    if tab == "balance":
-        rows = await db.get_top_custom("balance", 10)
-        title = "🏆 <b>ТОП-10 БОГАЧЕЙ (ПО БАЛАНСУ):</b>\n\n"
-        if not rows:
-            text = title + "<i>Список пуст.</i>"
-        else:
-            text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
-                display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['balance'])} 💰</code>\n"
-
-    elif tab == "turnover":
-        rows = await db.get_top_custom("turnover", 10)
-        title = "🏆 <b>ТОП-10 ИГРОКОВ (ПО ОБОРОТУ):</b>\n\n"
-        if not rows:
-            text = title + "<i>Список пуст.</i>"
-        else:
-            text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
-                display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['turnover'])} 💰</code>\n"
-
-    elif tab == "wins":
-        rows = await db.get_top_custom("wins", 10)
-        title = "🏆 <b>ТОП-10 ИГРОКОВ (ПО ПОБЕДАМ):</b>\n\n"
-        if not rows:
-            text = title + "<i>Список пуст.</i>"
-        else:
-            text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
-                display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{r['wins']}</b> побед\n"
-
-    elif tab == "winrate":
-        rows = await db.get_top_winrate(10)
-        title = "🏆 <b>ТОП-10 УДАЧЛИВЫХ (ПО ВИНРЕЙТУ):</b>\n<i>(мин. 3 игры)</i>\n\n"
-        if not rows:
-            text = title + "<i>Список пуст.</i>"
-        else:
-            text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
-                total = r["wins"] + r["losses"] + r["draws"]
-                wr = round((r["wins"] / total * 100), 1) if total > 0 else 0
-                display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{wr}%</b> побед <code>({r['wins']}/{total})</code>\n"
-    else:
-        text = "🏆 <b>Таблица лидеров</b>"
-
-    try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=top_menu_keyboard(tab))
-    except Exception:
-        pass
-    await call.answer()
-
-
-# ================= СИСТЕМА РЕПОРТОВ =================
-async def process_report_cmd(message: Message, args: List[str]):
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Команда доступна только в группах!")
-
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        return await safe_reply(message, "❌ Ответьте на сообщение нарушителя командой: <code>репорт [причина]</code>")
-
-    target = message.reply_to_message.from_user
-    if target.id == message.from_user.id:
-        return await safe_reply(message, "❌ Нельзя жаловаться на самого себя!")
-
-    if target.is_bot:
-        return await safe_reply(message, "❌ Нельзя отправлять жалобы на ботов!")
-
-    t_data = await db.get_user(target.id)
-    target_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
-
-    await safe_reply(
-        message, 
-        f"🚨 <b>Жалоба на пользователя {get_mention(target.id, target_name)} принята!</b>\nМодераторы чата могут наказать нарушителя:",
-        reply_markup=report_admin_keyboard(target.id)
-    )
-
-
-@dp.callback_query(F.data.startswith("adm_"))
-async def cb_admin_report_action(call: CallbackQuery):
-    parts = call.data.split("_")
-    action = parts[1]
-    
-    # Интерактивные кнопки панели создателя
-    if action == "refresh":
-        stats = await db.get_global_admin_stats()
-        text = format_admin_stats_text(stats)
-        try:
-            await call.message.edit_text(text, parse_mode="HTML", reply_markup=admin_dashboard_keyboard())
-        except Exception:
-            pass
-        return await call.answer("Данные обновлены!")
-
-    if action == "broadcast":
-        return await call.answer("Формат рассылки:\n/рассылка [текст] или ответом на пост", show_alert=True)
-
-    target_id = int(parts[2])
-    if not await db.is_admin(call.from_user.id, call.message.chat.id):
-        return await call.answer("❌ Только администратор может применить наказание!", show_alert=True)
-
-    if target_id == DEV_ID or target_id in CREATOR_IDS:
-        return await call.answer("❌ Нельзя наказать Создателя или Разработчика!", show_alert=True)
-
-    try:
-        if action == "mute":
-            dur = int(parts[3])
-            until = datetime.now() + timedelta(seconds=dur)
-            await call.message.chat.restrict(user_id=target_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
-            await call.message.reply(f"🔇 Администратор {get_mention(call.from_user.id, call.from_user.full_name)} выдал мут нарушителю на {format_duration(dur)}!", parse_mode="HTML")
-        elif action == "warn":
-            warns = await db.add_warn(target_id)
-            if warns >= 3:
-                await call.message.chat.ban(user_id=target_id)
-                await db.reset_warns(target_id)
-                await call.message.reply(f"🛑 Нарушитель набрал 3/3 варнов и забанен!", parse_mode="HTML")
-            else:
-                await call.message.reply(f"⚠️ Нарушителю выдан варн ({warns}/3)!", parse_mode="HTML")
-        elif action == "ban":
-            await call.message.chat.ban(user_id=target_id)
-            await call.message.reply(f"🛑 Нарушитель забанен администратором!", parse_mode="HTML")
-            
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.answer("Наказание применено!")
-    except Exception as e:
-        await call.answer(f"❌ Ошибка: {e}", show_alert=True)
-
-
-# ================= ПРОФИЛЬ =================
-async def process_profile_cmd(message: Message, args: List[str]):
-    req_user_id = message.from_user.id
-    target_id, target_name, _ = await resolve_target_user(message, args)
-    view_user_id = target_id if target_id else req_user_id
-
-    me = await bot.get_me()
-    if view_user_id == me.id:
-        return
-
-    user = await db.get_user(view_user_id)
-    if not user:
-        if view_user_id == req_user_id:
-            await db.register_user(view_user_id, message.from_user.full_name, message.from_user.username)
-            user = await db.get_user(view_user_id)
-        else:
-            return await safe_reply(message, "❌ Пользователь не найден в базе данных!")
-
-    name = user["username"]
-    balance = user["balance"]
-    turnover = user["turnover"]
-    wins = user["wins"]
-    losses = user["losses"]
-    draws = user["draws"]
-    warns = user["warns"]
-    display_name = user.get("custom_nick") or name
-
-    total_games = wins + losses + draws
-    winrate = round((wins / total_games * 100), 1) if total_games > 0 else 0
-
-    role_badge = "Игрок"
-    if view_user_id == DEV_ID:
-        role_badge = "🛠 Главный Разработчик"
-    elif view_user_id in CREATOR_IDS:
-        role_badge = "👑 Создатель"
-    elif await db.is_admin(view_user_id, message.chat.id):
-        role_badge = "🛡 Администратор"
-
-    text = (
-        f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, display_name)}\n"
-        f"┣ 🎖 <b>Статус:</b> <code>{role_badge}</code>\n"
-        f"┣ 🆔 <b>ID:</b> <code>{view_user_id}</code>\n"
-        f"┣ 💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
-        f"┣ 🔄 <b>Оборот:</b> <code>{fmt_num(turnover)} 💰</code>\n"
-        f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
-        f"┣ 🏆 <b>Побед:</b> <code>{wins}</code> | 💀 <b>Поражений:</b> <code>{losses}</code> | ⚖️ <b>Ничьих:</b> <code>{draws}</code>\n"
-        f"┣ 📈 <b>Винрейт:</b> <code>{winrate}%</code>\n"
-        f"┗ ⚠️ <b>Варны:</b> <code>{warns}/3</code>"
-    )
-    await safe_reply(message, text)
-
-
-# ================= СОЗДАНИЕ ЧЕКОВ =================
-async def process_create_check_cmd(message: Message, args: List[str]):
-    user_id = message.from_user.id
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Создание чеков доступно только в группах!")
-
-    now = time.time()
-    last_chk = check_cooldowns.get(user_id, 0.0)
-    if now - last_chk < 30.0 and user_id != DEV_ID and user_id not in CREATOR_IDS:
-        rem_sec = int(30.0 - (now - last_chk))
-        return await safe_reply(message, f"⏳ Создавать чеки можно не чаще раза в 30 сек! Подождите: <b>{rem_sec} сек.</b>")
-
-    if len(args) < 2:
-        return await safe_reply(message, "❌ Формат: <code>чек [общая_сумма] [кол-во_человек]</code>\n<i>Пример:</i> <code>чек 50к 5</code>")
-
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    total_amount = parse_amount_string(args[0], user_bal)
-    if total_amount is None or total_amount <= 0:
-        return await safe_reply(message, "❌ Укажите корректную сумму чека (например: <code>чек 10к 5</code>)!")
-
-    try:
-        activations = int(args[1])
-    except ValueError:
-        return await safe_reply(message, "❌ Количество человек должно быть числом!")
-
-    if activations < 1 or activations > 50:
-        return await safe_reply(message, "❌ Количество активаций от 1 до 50 человек!")
-
-    if total_amount < activations * 100:
-        return await safe_reply(message, "❌ Минимальная сумма на человека: <b>100 💰</b>!")
-
-    if user_bal < total_amount:
-        return await safe_reply(message, f"❌ У вас недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>")
-
-    await db.change_balance(user_id, -total_amount)
-    check_cooldowns[user_id] = now
-
-    check_id = uuid.uuid4().hex[:8]
-    amount_per_user = total_amount // activations
-    display_name = user.get("custom_nick") or message.from_user.full_name
-
-    active_checks[check_id] = {
-        "creator_id": user_id,
-        "creator_name": display_name,
-        "total_amount": total_amount,
-        "amount_per_user": amount_per_user,
-        "total_activations": activations,
-        "remaining_activations": activations,
-        "claimed_users": set()
-    }
-
-    text = (
-        f"🎁 <b>РАЗДАЧА ЧЕКА В ЧАТЕ!</b>\n\n"
-        f"👤 Создатель: {get_mention(user_id, display_name)}\n"
-        f"💰 Общий банк: <b>{fmt_num(total_amount)} 💰</b>\n"
-        f"💵 Каждый получит: <b>+{fmt_num(amount_per_user)} 💰</b>\n"
-        f"👥 Осталось мест: <b>{activations}/{activations}</b>\n\n"
-        f"<i>Нажмите кнопку ниже, чтобы забрать монеты! (Чек бессрочный)</i>"
-    )
-    await safe_reply(message, text, reply_markup=check_keyboard(check_id, activations, activations))
-
-
-@dp.callback_query(F.data.startswith("take_chk_"))
-async def cb_take_check(call: CallbackQuery):
-    check_id = call.data.replace("take_chk_", "")
-    user_id = call.from_user.id
-
-    if check_id not in active_checks:
-        return await call.answer("❌ Этот чек уже полностью разобран!", show_alert=True)
-
-    chk = active_checks[check_id]
-
-    if user_id == chk["creator_id"]:
-        return await call.answer("❌ Вы не можете забрать свой собственный чек!", show_alert=True)
-
-    if user_id in chk["claimed_users"]:
-        return await call.answer("❌ Вы уже активировали этот чек!", show_alert=True)
-
-    if not await check_subscription(user_id):
-        return await call.answer(f"⚠️ Сначала подпишитесь на обязательный канал {REQUIRED_CHANNEL}!", show_alert=True)
-
-    chk["claimed_users"].add(user_id)
-    chk["remaining_activations"] -= 1
-    reward = chk["amount_per_user"]
-
-    await db.register_user(user_id, call.from_user.full_name, call.from_user.username)
-    await db.change_balance(user_id, reward)
-
-    await call.answer(f"🎉 Вы получили +{fmt_num(reward)} монет!", show_alert=True)
-
-    if chk["remaining_activations"] <= 0:
-        del active_checks[check_id]
-        await call.message.edit_text(
-            f"🎁 <b>ЧЕК ПОЛНОСТЬЮ РАЗОБРАН!</b>\n\n"
-            f"👤 Создатель: {get_mention(chk['creator_id'], chk['creator_name'])}\n"
-            f"💰 Всего роздано: <b>{fmt_num(chk['total_amount'])} 💰</b> на <b>{chk['total_activations']}</b> чел.",
-            parse_mode="HTML"
-        )
-    else:
-        rem = chk["remaining_activations"]
-        tot = chk["total_activations"]
-        try:
-            await call.message.edit_reply_markup(reply_markup=check_keyboard(check_id, rem, tot))
-        except Exception:
-            pass
-
-
-# ================= БОНУС СПОНСОРА =================
-async def process_sponsor_cmd(message: Message):
-    user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    user = await db.get_user(user_id)
-    if not user:
-        return
-
-    claimed = user.get("sponsor_bonus_claimed", False)
-    if claimed:
-        return await safe_reply(message, "✅ <b>Вы уже получали бонус за подписку на спонсора (+50 000 💰)!</b>")
-
-    text = (
-        f"📢 <b>БОНУС ЗА ПОДПИСКУ НА СПОНСОРА!</b>\n\n"
-        f"Подпишитесь на канал спонсора <b>{SPONSOR_CHANNEL}</b> и получите подарок:\n"
-        f"💰 <b>+50 000 монет на баланс!</b>\n\n"
-        f"<i>После подписки нажмите кнопку проверки ниже:</i>"
-    )
-    await safe_reply(message, text, reply_markup=sponsor_keyboard(user_id))
-
-
-@dp.callback_query(F.data.startswith("sps_chk_"))
-async def cb_sponsor_bonus_claim(call: CallbackQuery):
-    target_id_str = call.data.replace("sps_chk_", "")
-    if target_id_str.isdigit() and call.from_user.id != int(target_id_str):
-        return await call.answer("❌ Это не ваша кнопка проверки бонуса!", show_alert=True)
-
-    user_id = call.from_user.id
-    user = await db.get_user(user_id)
-    if not user:
-        return await call.answer("❌ Ошибка профиля!", show_alert=True)
-
-    if user.get("sponsor_bonus_claimed", False):
-        return await call.answer("❌ Вы уже забрали этот бонус ранее!", show_alert=True)
-
-    is_sponsor_member = await check_channel_member(user_id, SPONSOR_CHANNEL)
-    if not is_sponsor_member:
-        return await call.answer(f"❌ Вы ещё не подписались на {SPONSOR_CHANNEL}!", show_alert=True)
-
-    reward = 50000
-    await db.change_balance(user_id, reward)
-    await db.set_sponsor_claimed(user_id)
-
-    display_name = user.get("custom_nick") or call.from_user.full_name
-    await call.answer("🎉 Бонус +50 000 💰 успешно зачислен на баланс!", show_alert=True)
-    try:
-        await call.message.edit_text(
-            f"🎉 <b>БОНУС СПОНСОРА ПОЛУЧЕН!</b>\n\n"
-            f"👤 Игрок: {get_mention(user_id, display_name)}\n"
-            f"💰 Начислено: <b>+{fmt_num(reward)} 💰</b> на баланс.",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-
-# ================= ВОРК =================
-async def process_work_cmd(message: Message):
-    user_id = message.from_user.id
-    await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-
-    if not await check_subscription(user_id):
-        return await safe_reply(message, f"⚠️ <b>Для работы необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-
-    user = await db.get_user(user_id)
-    if not user:
-        return
-
-    last_work = user.get("last_work_time")
-    now = datetime.now()
-
-    if not last_work:
-        diff_seconds = 7200
-    else:
-        diff_seconds = (now - last_work).total_seconds()
-
-    display_name = user.get("custom_nick") or message.from_user.full_name
-
-    if diff_seconds < 7200:
-        remaining = int(7200 - diff_seconds)
-        hours = remaining // 3600
-        mins = (remaining % 3600) // 60
-        secs = remaining % 60
-        time_left_str = f"{hours} ч. {mins} мин." if hours > 0 else f"{mins} мин. {secs} сек."
-        return await safe_reply(
-            message,
-            f"⏳ {get_mention(user_id, display_name)}, вы недавно закончили смену!\n"
-            f"Следующая зарплата доступна через: <b>{time_left_str}</b>\n\n"
-            f"💼 <i>Зарплата копится каждый час (вплоть до 24 часов). Чем дольше смена — тем выше куш!</i>"
-        )
-
-    capped_seconds = min(diff_seconds, 86400)
-    accumulated_hours = capped_seconds / 3600.0
-
-    rate_per_hour = random.randint(18000, 24000)
-    earned = int(rate_per_hour * accumulated_hours) + random.randint(5000, 15000)
-    earned = max(35000, min(earned, 580000))
-
-    task = random.choice(WORK_TASKS)
-
-    await db.change_balance(user_id, earned)
-    await db.update_work_time(user_id)
-
-    formatted_time = format_duration(int(diff_seconds))
-    is_max = " <i>(Достигнут максимум смены 24ч)</i>" if diff_seconds >= 86400 else ""
-
-    await safe_reply(
-        message,
-        f"💼 <b>ЗАРПЛАТА ПОЛУЧЕНА!</b>\n\n"
-        f"👤 Работник: {get_mention(user_id, display_name)}\n"
-        f"🛠 Вы успешно {task}!\n"
-        f"⏱ <b>Отработано времени:</b> {formatted_time}{is_max}\n"
-        f"💵 Ставка: <code>~{fmt_num(rate_per_hour)} 💰/час</code>\n"
-        f"💰 <b>Итого начислено: +{fmt_num(earned)} монет!</b>\n\n"
-        f"⏰ <i>Следующая смена доступна через 2 часа.</i>"
-    )
-
-
-# ================= ГЛАВНОЕ МЕНЮ =================
-async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
-    ref_id = None
-    if ref_arg and ref_arg.startswith("ref_"):
-        raw_id = ref_arg.replace("ref_", "")
-        if raw_id.isdigit() and int(raw_id) != message.from_user.id:
-            ref_id = int(raw_id)
-
-    await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username, ref_id)
-    user = await db.get_user(message.from_user.id)
-    balance = user["balance"] if user else 10000
-    display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-
-    text = (
-        f"👑 <b>DUEL CUBES | ИГРОВОЙ КЛУБ</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 <b>Игрок:</b> {get_mention(message.from_user.id, display_name)}\n"
-        f"💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💼 <b>Заработок монет:</b>\n"
-        f"├ 🛠 <code>ворк</code> — забрать зарплату (раз в 2ч, копится до 24ч)\n"
-        f"├ 🎁 <code>промик MUSORDROP</code> — бонус <b>+50 000 💰</b>\n"
-        f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
-        f"🎲 <b>Список игровых режимов:</b>\n"
-        f"<blockquote expandable>"
-        f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека (бессрочный)\n"
-        f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1\n"
-        f"🎲 <code>кубик [ставка/вабанк]</code> — 1 кубик против бота\n"
-        f"🎲🎲 <code>кубы [ставка/вабанк]</code> — 2 кубика (х3.0 за дубль!)\n"
-        f"🚀 <code>лесенка [ставка/вабанк]</code> — Лесенка (до x7.5)\n"
-        f"📈 <code>больше [ставка/вабанк]</code> — Числа 4, 5, 6\n"
-        f"📉 <code>меньше [ставка/вабанк]</code> — Числа 1, 2, 3\n"
-        f"⚖️ <code>четное [ставка/вабанк]</code> — Чётный кубик\n"
-        f"🎯 <code>нечетное [ставка/вабанк]</code> — Нечётный кубик"
-        f"</blockquote>\n\n"
-        f"📊 <b>Навигация и профиль:</b>\n"
-        f"👤 <code>ник [имя]</code> — установить ник\n"
-        f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 💬 <code>топ сообщений</code>\n"
-        f"📜 <code>правила</code> | 👥 <code>список админов</code>\n"
-        f"🤝 <code>реф</code> — партнерка 3% | 💸 <code>перевод [сумма] @username</code>"
-    )
-
-    me = await bot.get_me()
-    markup = start_private_keyboard(me.username) if message.chat.type == "private" else None
-    await safe_reply(message, text, reply_markup=markup)
-
-
-# ================= ПЕРЕВОД МОНЕТ =================
-async def process_pay_cmd(message: Message, args: List[str]):
-    sender = message.from_user
-    if not await check_subscription(sender.id):
-        return await safe_reply(message, f"⚠️ <b>Для переводов необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(sender.id))
-
-    sender_data = await db.get_user(sender.id)
-    sender_bal = sender_data["balance"] if sender_data else 0
-    s_name = sender_data.get("custom_nick") or sender.full_name
-
-    total_games = (sender_data.get("wins", 0) + sender_data.get("losses", 0) + sender_data.get("draws", 0)) if sender_data else 0
-    if total_games < 3 and sender.id != DEV_ID and sender.id not in CREATOR_IDS:
-        return await safe_reply(message, "🛡 <b>Защита от накрутки:</b> совершать переводы могут только игроки, сыгравшие минимум 3 игры!")
-
-    recipient_id, recipient_name = None, None
-    amount_raw = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user
-        if target.is_bot:
-            return await safe_reply(message, "❌ Нельзя переводить монеты ботам!")
-        recipient_id = target.id
-        t_data = await db.get_user(target.id)
-        recipient_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
-        amount_raw = args[0] if args else None
-    else:
-        if not args:
-            return await safe_reply(message, "❌ Формат: <code>перевод [сумма/3кк] @username</code> или ответом на сообщение.")
-        for arg in args:
-            if arg.startswith("@") or (arg.isdigit() and len(arg) > 6 and int(arg) > 1000000):
-                clean_tag = arg.replace("@", "")
-                t_id = int(arg) if arg.isdigit() else await db.get_user_id_by_username(clean_tag)
-                if t_id:
-                    recipient_id = t_id
-                    u_data = await db.get_user(t_id)
-                    recipient_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"@{clean_tag}"
-            else:
-                amount_raw = arg
-
-    if not recipient_id:
-        return await safe_reply(message, "❌ Укажите получателя: <code>перевод 500 @username</code>")
-
-    if recipient_id == sender.id:
-        return await safe_reply(message, "❌ Нельзя переводить монеты самому себе!")
-
-    amount = parse_amount_string(amount_raw, sender_bal)
-    if amount is None or amount < 100:
-        return await safe_reply(message, "❌ Минимальная сумма перевода: <b>100 💰</b>! (Пример: <code>перевод 50к</code>, <code>перевод 3кк</code>)")
-
-    if sender_bal < amount:
-        return await safe_reply(message, f"❌ Недостаточно монет для перевода! Ваш баланс: <code>{fmt_num(sender_bal)} 💰</code>")
-
-    fee = max(1, int(amount * 0.05))
-    received_amount = amount - fee
-
-    await db.register_user(sender.id, sender.full_name, sender.username)
-    await db.register_user(recipient_id, recipient_name)
-
-    success = await db.transfer_money_transaction(sender.id, recipient_id, amount, received_amount)
-    if not success:
-        return await safe_reply(message, "❌ Ошибка транзакции: недостаточно средств!")
-
-    if amount >= 5000000:
-        admin_alert = (
-            f"🚨 <b>КРУПНЫЙ ПЕРЕВОД!</b>\n"
-            f"Отправитель: {sender.id} ({s_name})\n"
-            f"Получатель: {recipient_id} ({recipient_name})\n"
-            f"Сумма: <b>{fmt_num(amount)} 💰</b>"
-        )
-        for admin_id in [DEV_ID] + list(CREATOR_IDS):
-            try:
-                await bot.send_message(chat_id=admin_id, text=admin_alert, parse_mode="HTML")
-            except Exception:
-                pass
-
-    await safe_reply(
-        message,
-        f"💸 {get_mention(sender.id, s_name)} перевёл монеты игроку {get_mention(recipient_id, recipient_name)}!\n\n"
-        f"💵 <b>Сумма перевода:</b> <code>{fmt_num(amount)} 💰</code>\n"
-        f"🔥 <b>Комиссия банка (5% сгорело):</b> <code>-{fmt_num(fee)} 💰</code>\n"
-        f"💰 <b>Получатель зачислил:</b> <b>+{fmt_num(received_amount)} 💰</b>"
-    )
-
-
-# ================= ФОРМАТИРОВАНИЕ ДАШБОРДА СОЗДАТЕЛЯ =================
-def format_admin_stats_text(s: dict) -> str:
-    total_games = s["total_wins"] + s["total_losses"] + s["total_draws"]
-    winrate = round((s["total_wins"] / total_games * 100), 1) if total_games > 0 else 0
-    avg_balance = round(s["total_balance"] / s["total_users"]) if s["total_users"] > 0 else 0
-
-    return (
-        f"👑 <b>ПАНЕЛЬ УПРАВЛЕНИЯ ПРОЕКТОМ (ADMIN HQ)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 <b>Пользователи & Аудитория:</b>\n"
-        f"• Всего зарегистрировано: <b>{fmt_num(s['total_users'])}</b> чел.\n"
-        f"• Активных чатов / групп: <b>{fmt_num(s['total_chats'])}</b>\n"
-        f"• Крупнейший чат: <code>ID {s['top_chat_id']}</code> (<b>{s['top_chat_users']}</b> игроков)\n\n"
-        f"💰 <b>Экономика проекта:</b>\n"
-        f"• Общая денежная масса: <b>{fmt_num(s['total_balance'])} 💰</b>\n"
-        f"• Средний баланс игрока: <b>{fmt_num(avg_balance)} 💰</b>\n"
-        f"• Суммарный игровой оборот: <b>{fmt_num(s['total_turnover'])} 💰</b>\n"
-        f"• Главный богач: <b>{html.escape(s['richest_name'])}</b> (<code>{fmt_num(s['richest_bal'])} 💰</code>)\n\n"
-        f"🎮 <b>Игровая статистика:</b>\n"
-        f"• Всего раундов: <b>{fmt_num(total_games)}</b>\n"
-        f"• Побед игроков: <b>{fmt_num(s['total_wins'])}</b> (WR: <b>{winrate}%</b>)\n"
-        f"• Поражений игроков: <b>{fmt_num(s['total_losses'])}</b>\n"
-        f"• Ничьих: <b>{fmt_num(s['total_draws'])}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Панель обновляется в режиме реального времени.</i>"
-    )
-
-
-async def process_admin_stats_cmd(message: Message):
-    if not await db.can_give_money(message.from_user.id):
-        return await safe_reply(message, "❌ Доступ запрещён!")
-
-    stats = await db.get_global_admin_stats()
-    text = format_admin_stats_text(stats)
-    await safe_reply(message, text, reply_markup=admin_dashboard_keyboard())
-
-
-async def process_wipe_cmd(message: Message, args: List[str]):
-    if not await db.can_give_money(message.from_user.id):
-        return await safe_reply(message, "❌ Доступ запрещён!")
-
-    target_id, target_name = await resolve_rp_target(message, args)
-    if not target_id:
-        return await safe_reply(message, "❌ Укажите игрока: <code>/wipe @username</code> или ответом на сообщение.")
-
-    if target_id == DEV_ID or target_id in CREATOR_IDS:
-        return await safe_reply(message, "❌ Нельзя вайпнуть Создателя или Разработчика!")
-
-    await db.wipe_user_balance(target_id)
-    await safe_reply(message, f"🧹 Баланс игрока {get_mention(target_id, target_name)} успешно сброшен до 10 000 💰!")
-
-
-# ================= ИГРОВЫЕ МЕХАНИКИ =================
-async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    if user_bal < bet:
-        return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
-
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
-
-    display_name = user.get("custom_nick") or user_name
-    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
-    await safe_reply(message, f"{is_allin}🎲 Бросок {get_mention(user_id, display_name)} (Ставка: <b>{fmt_num(bet)} 💰</b>):")
-    p_msg = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    p_val = int(p_msg.dice.value)
-
-    await message.answer("🤖 Бросок Бота:", parse_mode="HTML")
-    b_msg = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    b_val = int(b_msg.dice.value)
-
-    if p_val > b_val:
-        win = int(bet * 1.9)
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-        text = (
-            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"💰 Коэффициент: <b>x1.9</b>\n"
-            f"💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        )
-        await send_game_result(message, "win", text, user_id=user_id, game_type="dice", bet=bet)
-    elif p_val < b_val:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
-        text = (
-            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
-        )
-        await send_game_result(message, "loss", text, user_id=user_id, game_type="dice", bet=bet)
-    else:
-        await db.change_balance(user_id, bet)
-        await db.record_game(user_id, "draw")
-        text = (
-            f"🎲 Игрок: [ <b>{p_val}</b> ] ⚡ Бот: [ <b>{b_val}</b> ]\n"
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"💰 <b>Возврат ставки:</b> <code>+{fmt_num(bet)} 💰</code>"
-        )
-        await send_game_result(message, "draw", text, user_id=user_id, game_type="dice", bet=bet)
-
-
-async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    if user_bal < bet:
-        return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
-
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
-
-    display_name = user.get("custom_nick") or user_name
-    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
-    await safe_reply(message, f"{is_allin}🎲🎲 <b>Бросок двух кубиков {get_mention(user_id, display_name)} (Ставка: {fmt_num(bet)} 💰):</b>")
-    p_d1 = await message.answer_dice(emoji="🎲")
-    p_d2 = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    p1, p2 = int(p_d1.dice.value), int(p_d2.dice.value)
-    p_sum = p1 + p2
-
-    await message.answer("🤖 <b>Бросок двух кубиков Бота:</b>", parse_mode="HTML")
-    b_d1 = await message.answer_dice(emoji="🎲")
-    b_d2 = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    b1, b2 = int(b_d1.dice.value), int(b_d2.dice.value)
-    b_sum = b1 + b2
-
-    if p_sum > b_sum:
-        is_double = (p1 == p2)
-        mult = 3.0 if is_double else 1.9
-        win = int(bet * mult)
-
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-
-        bonus_title = "🔥 <b>РЕДКИЙ МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
-        res = (
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
-            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
-            f"{bonus_title}💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        )
-        await send_game_result(message, "win", res, user_id=user_id, game_type="doubledice", bet=bet)
-    elif p_sum < b_sum:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
-        res = (
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
-            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
-            f"📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
-        )
-        await send_game_result(message, "loss", res, user_id=user_id, game_type="doubledice", bet=bet)
-    else:
-        await db.change_balance(user_id, bet)
-        await db.record_game(user_id, "draw")
-        res = (
-            f"👤 {get_mention(user_id, display_name)}\n"
-            f"🎲 Твои очки: {p1} + {p2} = <b>{p_sum}</b>\n"
-            f"🤖 Очки бота: {b1} + {b2} = <b>{b_sum}</b>\n\n"
-            f"💰 <b>Ничья! Ставка {fmt_num(bet)} 💰 возвращена на баланс.</b>"
-        )
-        await send_game_result(message, "draw", res, user_id=user_id, game_type="doubledice", bet=bet)
-
-
-async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    if user_bal < bet:
-        return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
-
-    await db.change_balance(user_id, -bet)
-    await db.add_turnover(user_id, bet)
-
-    type_titles = {
-        "over": "БОЛЬШЕ (4-6)",
-        "under": "МЕНЬШЕ (1-3)",
-        "even": "ЧЁТНОЕ (2, 4, 6)",
-        "odd": "НЕЧЁТНОЕ (1, 3, 5)"
-    }
-
-    display_name = user.get("custom_nick") or user_name
-    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
-    await safe_reply(message, f"{is_allin}🎲 {get_mention(user_id, display_name)} поставил <b>{fmt_num(bet)} 💰</b> на <b>{type_titles[game_type]}</b>:")
-    dice_msg = await message.answer_dice(emoji="🎲")
-    await asyncio.sleep(4.0)
-    val = int(dice_msg.dice.value)
-
-    win_cond = False
-    if game_type == "over" and val in [4, 5, 6]:
-        win_cond = True
-    elif game_type == "under" and val in [1, 2, 3]:
-        win_cond = True
-    elif game_type == "even" and (val % 2 == 0):
-        win_cond = True
-    elif game_type == "odd" and (val % 2 != 0):
-        win_cond = True
-
-    if win_cond:
-        win = int(bet * 1.9)
-        await db.change_balance(user_id, win)
-        await db.record_game(user_id, "win")
-        res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, display_name)}\n💰 Множитель: <b>x1.9</b>\n💵 Выигрыш: <b>+{fmt_num(win)} 💰</b>"
-        await send_game_result(message, "win", res, user_id=user_id, game_type=game_type, bet=bet)
-    else:
-        await db.record_game(user_id, "loss")
-        await db.process_referral_loss(user_id, bet)
-        res = f"🎲 Выпало: [ <b>{val}</b> ]\n👤 {get_mention(user_id, display_name)}\n📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
-        await send_game_result(message, "loss", res, user_id=user_id, game_type=game_type, bet=bet)
-
-
-# ================= СТРОГАЯ РАССЫЛКА =================
-@dp.message(F.text.startswith("/broadcast") | F.text.startswith("/рассылка"))
-async def cmd_broadcast_strict(message: Message):
-    if not await db.can_give_money(message.from_user.id):
-        return await safe_reply(message, "❌ Глобальная рассылка доступна только <b>Создателю и Разработчику</b>!")
-
-    parts = message.text.strip().split(maxsplit=1)
-    args_text = parts[1] if len(parts) > 1 else None
-
-    broadcast_text = None
-    if message.reply_to_message:
-        broadcast_text = message.reply_to_message.text or message.reply_to_message.caption
-    elif args_text:
-        broadcast_text = args_text
-
-    if not broadcast_text:
-        return await safe_reply(message, "❌ Формат: <code>/рассылка [текст]</code> или ответом на сообщение.")
-
-    user_ids = await db.get_all_user_ids()
-    status_msg = await message.reply(f"📢 Начинаю рассылку для <b>{len(user_ids)}</b> игроков...", parse_mode="HTML")
-
-    success = 0
-    blocked = 0
-
-    for u_id in user_ids:
-        try:
-            await bot.send_message(chat_id=u_id, text=broadcast_text, parse_mode="HTML")
-            success += 1
-            await asyncio.sleep(0.04)
-        except Exception:
-            blocked += 1
-
-    await status_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n\n"
-        f"📬 Доставлено: <b>{success}</b>\n"
-        f"🚫 Заблокировали бота / Ошибка: <b>{blocked}</b>",
-        parse_mode="HTML"
-    )
-
-
-# ================= ОСНОВНОЙ МАРШРУТИЗАТОР =================
-@dp.message(F.text)
-async def handle_all_text_commands(message: Message):
-    raw_text = message.text.strip()
-    if not raw_text:
-        return
-
-    full_lower = raw_text.lower()
-    chat_id = message.chat.id
-
-    # 1. Проверка викторины
-    if chat_id in active_quizzes:
-        quiz = active_quizzes[chat_id]
-        if full_lower == quiz["answer"]:
-            reward = quiz["reward"]
-            del active_quizzes[chat_id]
-
-            await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-            await db.change_balance(message.from_user.id, reward)
-            user_data = await db.get_user(message.from_user.id)
-            display_name = (user_data.get("custom_nick") or message.from_user.full_name) if user_data else message.from_user.full_name
-
-            return await safe_reply(
-                message,
-                f"🎉 <b>ПОБЕДА В ВИКТОРИНЕ!</b>\n\n"
-                f"👤 {get_mention(message.from_user.id, display_name)} ответил первым!\n"
-                f"💰 Награда: <b>+{fmt_num(reward)} монет</b> зачислена на баланс."
-            )
-
-    # 2. Управление чатом (+чат / -чат)
-    if full_lower in ["-чат", "закрыть чат", "/closechat", "чат закрыть"]:
-        return await close_chat_cmd(message)
-
-    if full_lower in ["+чат", "открыть чат", "/openchat", "чат открыть"]:
-        return await open_chat_cmd(message)
-
-    # 3. Включение / выключение RP-команд
-    if full_lower in ["-рп", "-rp", "выкл рп", "отключить рп", "рп выкл"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Команда доступна только в группах!")
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ Только администратор чата может отключать RP-команды!")
-        await db.set_chat_rp(message.chat.id, False)
-        return await safe_reply(message, "🔇 <b>RP-команды в этом чате успешно отключены (-рп)!</b>")
-
-    if full_lower in ["+рп", "+rp", "вкл рп", "включить рп", "рп вкл"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Команда доступна только в группах!")
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ Только администратор чата может включать RP-команды!")
-        await db.set_chat_rp(message.chat.id, True)
-        return await safe_reply(message, "🔊 <b>RP-команды в этом чате успешно включены (+рп)!</b>")
-
-    # 4. Панель создателя и статистика
-    if full_lower in ["/admin_stats", "/admin", "админ стата", "панель", "админка"]:
-        return await process_admin_stats_cmd(message)
-
-    parts = raw_text.split()
-    if not parts:
-        return
-
-    # Чистое первое слово
-    raw_first = parts[0].lower().lstrip("/")
-    first_word = raw_first.split("@")[0]
-    args = parts[1:]
-
-    # Старт и базовые команды
-    if first_word in ["start", "старт", "меню", "menu", "помощь", "help", "инфо"]:
-        ref_arg = args[0] if args else None
-        return await process_start_cmd(message, ref_arg)
-
-    if first_word in ["бот", "bot"] and len(parts) <= 2:
-        return await process_start_cmd(message)
-
-    # Профиль и баланс
-    if first_word in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
-        return await process_profile_cmd(message, args)
-
-    # Вайп
-    if first_word in ["wipe", "вайп", "обнулить"]:
-        return await process_wipe_cmd(message, args)
-
-    # Кастомный ник
-    if first_word == "ник":
-        nick_val = raw_text[len(parts[0]):].strip()
-        return await process_nick_cmd(message, nick_val)
-
-    if full_lower in ["удалить ник", "сбросить ник", "снять ник"]:
-        return await process_reset_nick_cmd(message)
-
-    # Промокод
-    if first_word in ["промо", "промик", "промокод", "promocode", "promo"]:
-        code_val = args[0] if args else ""
-        return await process_promo_cmd(message, code_val)
-
-    # Топ сообщений
-    if full_lower in ["топ сообщений", "топ соо", "топ сообщений чата", "топ_соо"]:
-        return await process_top_messages_cmd(message)
-    elif first_word in ["topmsg", "topmessages"]:
-        return await process_top_messages_cmd(message)
-
-    # Топ игроков
-    if first_word in ["top", "топ", "лидеры", "богачи"]:
-        return await process_top_cmd(message)
-
-    # Правила
-    if full_lower.startswith("установить правила") or full_lower.startswith("поставить правила") or first_word in ["setrules", "установитьправила"]:
-        rules_content = raw_text.split(maxsplit=2)[2] if len(raw_text.split(maxsplit=2)) > 2 else " ".join(args)
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Правила можно устанавливать только в группах!")
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора для установки правил!")
-        await db.set_rules(message.chat.id, rules_content.strip(), message.from_user.full_name)
-        return await safe_reply(message, "✅ <b>Правила чата успешно установлены и сохранены!</b>")
-
-    if full_lower in ["правила", "rules", "правила чата", "правила группы"] or first_word == "rules":
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Команда доступна только в группах!")
-        data = await db.get_rules(message.chat.id)
-        if not data or not data["rules"]:
-            return await safe_reply(message, "📜 <b>В этом чате ещё не установлены правила!</b>")
-        return await safe_reply(message, f"📜 <b>ПРАВИЛА ЧАТА:</b>\n━━━━━━━━━━━━━━━━━━━━\n{html.escape(data['rules'])}\n━━━━━━━━━━━━━━━━━━━━")
-
-    if full_lower in ["удалить правила", "сбросить правила"] or first_word in ["delrules", "удалитьправила"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Команда доступна только в группах!")
-        if not await db.is_creator(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ Только Владелец чата или Разработчик может удалить правила!")
-        await db.delete_rules(message.chat.id)
-        return await safe_reply(message, "🗑 <b>Правила чата были полностью удалены.</b>")
-
-    # Админы чата
-    if full_lower in ["список админов", "админы", "состав", "список_админов", "admins", "администрация"] or first_word in ["admins", "списокадминов"]:
-        return await process_admins_list_cmd(message)
-
-    if first_word in ["addadmin", "добавитьадмина", "датьадмина"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Назначение администраторов доступно только в группах!")
-        if not await db.is_creator(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ Назначать администраторов может только <b>Владелец чата</b> или <b>Разработчик</b>!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите игрока: <code>/addadmin @username</code>")
-        await db.add_chat_admin(message.chat.id, target_id)
-        return await safe_reply(message, f"👑 {get_mention(target_id, target_name)} назначен <b>Администратором этого чата</b>!")
-
-    elif first_word in ["deladmin", "удалитьадмина", "снятадмина"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Снятие администраторов доступно только в группах!")
-        if not await db.is_creator(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ Снимать администраторов может только <b>Владелец чата</b> или <b>Разработчик</b>!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите игрока: <code>/deladmin @username</code>")
-        if target_id == DEV_ID or target_id in CREATOR_IDS:
-            return await safe_reply(message, "❌ Нельзя снять Создателя или Разработчика!")
-        await db.remove_chat_admin(message.chat.id, target_id)
-        return await safe_reply(message, f"🚫 {get_mention(target_id, target_name)} снят с должности Администратора этого чата.")
-
-    # Модерация
-    elif first_word in ["mute", "мут", "завалить", "замутить"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите игрока: <code>/mute 10м @username Спам</code> или ответом на сообщение.")
-        if target_id == DEV_ID or target_id in CREATOR_IDS:
-            return await safe_reply(message, "❌ Нельзя замутить Создателя или Разработчика!")
-        duration_sec = 600
-        reason = "Без причины"
-        if args:
-            parsed = parse_time_string(args[0])
-            if parsed is not None:
-                duration_sec = max(30, parsed)
-                if len(args) > 1:
-                    reason = " ".join(args[1:])
-            else:
-                reason = " ".join(args)
-        try:
-            until = datetime.now() + timedelta(seconds=duration_sec)
-            await message.chat.restrict(user_id=target_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
-            return await safe_reply(message, f"🔇 {get_mention(target_id, target_name)} отправлен в мут на <b>{format_duration(duration_sec)}</b>\n📝 Причина: {html.escape(reason)}")
-        except Exception as e:
-            return await safe_reply(message, f"❌ Ошибка: {e}")
-
-    elif first_word in ["unmute", "размут", "снятьмут"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите пользователя: <code>/unmute @username</code> или ответом на сообщение.")
-        try:
-            await message.chat.restrict(
-                user_id=target_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True, can_send_audios=True, can_send_documents=True,
-                    can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
-                    can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
-                    can_add_web_page_previews=True
-                )
-            )
-            return await safe_reply(message, f"🔊 {get_mention(target_id, target_name)} размучен.")
-        except Exception as e:
-            return await safe_reply(message, f"❌ Ошибка: {e}")
-
-    elif first_word in ["ban", "бан", "забанить", "кик", "kick"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Использование: <code>/ban @username</code> или ответом на сообщение.")
-        if target_id == DEV_ID or target_id in CREATOR_IDS:
-            return await safe_reply(message, "❌ Нельзя наказать Создателя или Разработчика!")
-        try:
-            await message.chat.ban(user_id=target_id)
-            return await safe_reply(message, f"🛑 {get_mention(target_id, target_name)} забанен.")
-        except Exception as e:
-            return await safe_reply(message, f"❌ Ошибка при бане: {e}")
-
-    elif first_word in ["unban", "разбан", "снятьбан"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Использование: <code>/unban @username</code> или <code>/unban 12345678</code>")
-        try:
-            await message.chat.unban(user_id=target_id, only_if_banned=True)
-            return await safe_reply(message, f"✅ Пользователь {get_mention(target_id, target_name)} успешно разбанен в чате!")
-        except Exception as e:
-            return await safe_reply(message, f"❌ Ошибка разбана: {e}")
-
-    elif first_word in ["warn", "варн", "пред", "предупреждение"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите игрока: <code>/warn @username</code> или ответом на сообщение.")
-        if target_id == DEV_ID or target_id in CREATOR_IDS:
-            return await safe_reply(message, "❌ Нельзя выдать варн Создателю или Разработчику!")
-        await db.register_user(target_id, target_name)
-        warns = await db.add_warn(target_id)
-        if warns >= 3:
-            try:
-                await message.chat.ban(user_id=target_id)
-                await db.reset_warns(target_id)
-                return await safe_reply(message, f"🛑 {get_mention(target_id, target_name)} набрал <b>3/3 варнов</b> и получил бан!")
-            except Exception as e:
-                return await safe_reply(message, f"❌ Ошибка при бане: {e}")
-        else:
-            return await safe_reply(message, f"⚠️ {get_mention(target_id, target_name)} получил варн (<b>{warns}/3</b>)!")
-
-    elif first_word in ["unwarn", "снятьварн", "разварн", "снятьпред"]:
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        target_id, target_name = await resolve_rp_target(message, args)
-        if not target_id:
-            return await safe_reply(message, "❌ Укажите игрока: <code>/unwarn @username</code> или ответом на сообщение.")
-        await db.reset_warns(target_id)
-        return await safe_reply(message, f"✅ Предупреждения игрока {get_mention(target_id, target_name)} аннулированы.")
-
-    # Статистика чата
-    if full_lower in ["стата чата", "статистика чата", "стата_чата", "чат стата", "чат статистика", "топ чата"] or first_word in ["chatstats", "статачата", "чатстата", "чат"]:
-        return await process_chat_stats_cmd(message)
-
-    # Спонсорка
-    if full_lower in ["бонус спонсора", "спонсор бонус", "бонус_спонсора", "спонсор"] or first_word in ["sponsor", "sub_bonus", "subbonus"]:
-        return await process_sponsor_cmd(message)
-
-    # Ворк
-    if first_word in ["work", "работа", "ворк", "заработать", "зарплата", "смена"]:
-        return await process_work_cmd(message)
-
-    # Чеки
-    if first_word in ["check", "чек", "чеки", "раздача"]:
-        return await process_create_check_cmd(message, args)
-
-    # Перевод
-    if first_word in ["pay", "передать", "перевод"]:
-        return await process_pay_cmd(message, args)
-
-    # Дуэли
-    if first_word in ["duel", "дуэль", "вызов", "дуели", "дуель"]:
-        return await process_duel_cmd(message, args)
-
-    # Рефералка
-    if first_word in ["ref", "реф", "рефералы", "друзья", "партнерка"]:
-        if not await check_subscription(message.from_user.id):
-            return await safe_reply(message, f"⚠️ <b>Необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(message.from_user.id))
-        me = await bot.get_me()
-        ref_link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
-        ref_count = await db.get_referrals_count(message.from_user.id)
-        text_ref = (
-            f"🤝 <b>Реферальная программа</b>\n\n"
-            f"Приглашай друзей и получай <b>3% от каждой их ставки</b> во всех режимах кубиков!\n\n"
-            f"👥 Твоих рефералов: <b>{ref_count}</b>\n"
-            f"🔗 Ссылка для приглашения:\n<code>{ref_link}</code>"
-        )
-        return await safe_reply(message, text_ref)
-
-    # Очистка чата
-    if first_word in ["clear", "очистить", "удалить", "clean", "purge"]:
-        if message.chat.type not in ["group", "supergroup"]:
-            return await safe_reply(message, "❌ Очистка доступна только в группах!")
-        if not await db.is_admin(message.from_user.id, message.chat.id):
-            return await safe_reply(message, "❌ У вас нет прав администратора!")
-        count = 10
-        if args and args[0].isdigit():
-            count = min(100, max(1, int(args[0])))
-        deleted = 0
-        start_msg_id = message.message_id
-        for msg_id in range(start_msg_id, max(1, start_msg_id - count - 1), -1):
-            try:
-                await bot.delete_message(chat_id=message.chat.id, message_id=msg_id)
-                deleted += 1
-            except Exception:
-                pass
-        info_msg = await message.answer(f"🧹 Удалено сообщений: <b>{deleted}</b>", parse_mode="HTML")
-        await asyncio.sleep(4)
-        try:
-            await info_msg.delete()
-        except Exception:
-            pass
-        return
-
-    # Выдача монет
-    if first_word in ["give", "выдать", "начислить", "сет", "set"]:
-        if not await db.can_give_money(message.from_user.id):
-            return await safe_reply(message, "❌ Функция выдачи монет доступна только <b>Создателю и Разработчику</b> бота!")
-        target_id, target_name = None, None
-        amount_raw = None
-        if message.reply_to_message and message.reply_to_message.from_user:
-            target = message.reply_to_message.from_user
-            target_id = target.id
-            t_data = await db.get_user(target.id)
-            target_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
-            if args:
-                amount_raw = args[0]
-        else:
-            if len(args) >= 2:
-                for arg in args:
-                    if parse_amount_string(arg, 0) is not None:
-                        amount_raw = arg
-                    else:
-                        t_id, t_name = await resolve_rp_target(message, [arg])
-                        if t_id:
-                            target_id, target_name = t_id, t_name
-
-        if not target_id or not amount_raw:
-            return await safe_reply(message, "❌ Формат: <code>/give 3кк @username</code> или <code>выдать 100к</code> ответом на сообщение.")
-
-        is_negative = amount_raw.startswith("-")
-        clean_amount_str = amount_raw.lstrip("-")
-        amount = parse_amount_string(clean_amount_str, 0)
-        if amount is None:
-            return await safe_reply(message, "❌ Неверный формат суммы!")
-        if is_negative:
-            amount = -amount
-
-        await db.register_user(target_id, target_name)
-        await db.change_balance(target_id, amount)
-        verb = "выдал" if amount >= 0 else "забрал"
-        return await safe_reply(message, f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!")
-
-    # 🎲 КУБЫ
-    if first_word in ["кубы", "кубики", "кубсы", "дабл", "doubledice", "2dice", "дубль", "2кубика"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        
-        raw_bet_arg = args[0] if args else "100"
-        bet = parse_amount_string(raw_bet_arg, user_bal)
-        if bet is None:
-            return await safe_reply(message, "❌ <b>Укажите корректную ставку!</b>\nФормат: <code>кубы 500</code>, <code>кубы 3кк</code> или <code>кубы вабанк</code>")
-        if bet < 100:
-            return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "doubledice", run_doubledice_game):
-            return await run_doubledice_game(message, user_id, display_name, bet)
-
-    # 🎲 КУБИК
-    if first_word in ["dice", "кубик", "кость", "кости", "куб"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        
-        raw_bet_arg = args[0] if args else "100"
-        bet = parse_amount_string(raw_bet_arg, user_bal)
-        if bet is None:
-            return await safe_reply(message, "❌ <b>Укажите корректную ставку!</b>\nФормат: <code>кубик 500</code>, <code>кубик 2кк</code> или <code>кубик вабанк</code>")
-        if bet < 100:
-            return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "dice", run_dice_game):
-            return await run_dice_game(message, user_id, display_name, bet)
-
-    # 🚀 ЛЕСЕНКА
-    if first_word in ["ladder", "лесенка", "лестница", "ступень"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        
-        raw_bet_arg = args[0] if args else "100"
-        bet = parse_amount_string(raw_bet_arg, user_bal)
-        if bet is None:
-            return await safe_reply(message, "❌ <b>Укажите корректную ставку!</b>\nФормат: <code>лесенка 500</code>, <code>лесенка 1кк</code> или <code>лесенка вабанк</code>")
-        if bet < 100:
-            return await safe_reply(message, f"❌ Минимальная ставка в Лесенке: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
-        if user_bal < bet:
-            return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
-
-        if await check_bet_confirmation(message, user_id, display_name, bet, "ladder", run_ladder_game):
-            return await run_ladder_game(message, user_id, display_name, bet)
-
-    # 📈 БОЛЬШЕ / МЕНЬШЕ / ЧЁТ / НЕЧЁТ
-    if first_word in ["over", "больше", "бол", "хай", "high"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        bet = parse_amount_string(args[0] if args else "100", user_bal)
-        if bet is None or bet < 100:
-            return await safe_reply(message, f"❌ Укажите ставку от 100 💰!")
-        async def simple_wrapper(msg, uid, uname, b):
-            await run_simple_bet_game(msg, uid, uname, b, "over")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "over", simple_wrapper):
-            return await run_simple_bet_game(message, user_id, display_name, bet, "over")
-
-    elif first_word in ["under", "меньше", "мен", "лоу", "low"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        bet = parse_amount_string(args[0] if args else "100", user_bal)
-        if bet is None or bet < 100:
-            return await safe_reply(message, f"❌ Укажите ставку от 100 💰!")
-        async def simple_wrapper(msg, uid, uname, b):
-            await run_simple_bet_game(msg, uid, uname, b, "under")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "under", simple_wrapper):
-            return await run_simple_bet_game(message, user_id, display_name, bet, "under")
-
-    elif first_word in ["even", "чет", "четное", "чёт", "чётное"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        bet = parse_amount_string(args[0] if args else "100", user_bal)
-        if bet is None or bet < 100:
-            return await safe_reply(message, f"❌ Укажите ставку от 100 💰!")
-        async def simple_wrapper(msg, uid, uname, b):
-            await run_simple_bet_game(msg, uid, uname, b, "even")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "even", simple_wrapper):
-            return await run_simple_bet_game(message, user_id, display_name, bet, "even")
-
-    elif first_word in ["odd", "нечет", "нечетное", "нечёт", "нечётное"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
-        if not await check_subscription(user_id):
-            return await safe_reply(message, f"⚠️ <b>Для игры необходимо подписаться на наш канал {REQUIRED_CHANNEL}!</b>", reply_markup=sub_keyboard(user_id))
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-        bet = parse_amount_string(args[0] if args else "100", user_bal)
-        if bet is None or bet < 100:
-            return await safe_reply(message, f"❌ Укажите ставку от 100 💰!")
-        async def simple_wrapper(msg, uid, uname, b):
-            await run_simple_bet_game(msg, uid, uname, b, "odd")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "odd", simple_wrapper):
-            return await run_simple_bet_game(message, user_id, display_name, bet, "odd")
-
-    # И в самом конце — RP-действия
-    clean_rp_word = re.sub(r"[^\w]", "", first_word)
-    if clean_rp_word in RP_ACTIONS:
-        return await handle_rp_action(message, clean_rp_word, args)
-
-
 # ================= ЗАПУСК =================
 async def handle_ping(request):
     return web.Response(text="Duel Cubes Bot is running smoothly! 🎲", status=200)
@@ -3153,6 +1202,7 @@ async def on_startup(bot: Bot):
     except Exception as e:
         logging.warning(f"Ошибка регистрации команд в Telegram API: {e}")
 
+    # Запуск фоновых воркеров строго после готовности базы данных
     asyncio.create_task(quiz_background_worker())
     asyncio.create_task(db_cleanup_background_worker())
 
