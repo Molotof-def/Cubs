@@ -23,7 +23,8 @@ from aiogram.types import (
     ChatMemberOwner,
     ChatMemberAdministrator,
     ChatMemberMember,
-    ChatMemberRestricted
+    ChatMemberRestricted,
+    URLInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -33,8 +34,8 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     exit("❌ ОШИБКА: Токен бота не найден в переменных окружения (BOT_TOKEN)!")
 
-DEV_ID: int = 5103088337  # Главный разработчик
-CREATOR_IDS: set = {2053035323}  # Создатель бота
+DEV_ID: int = 5103088337
+CREATOR_IDS: set = {2053035323}
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:
@@ -57,6 +58,10 @@ SPONSOR_CHANNEL: str = SPONSOR_CHANNEL_RAW
 RENDER_EXTERNAL_URL: Optional[str] = os.getenv("RENDER_EXTERNAL_URL")
 PORT: int = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH: str = "/webhook"
+
+IMG_WIN: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.jpg"
+IMG_LOSS: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.jpg"
+IMG_DRAW: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/draw.jpg"
 
 MOTIVATIONAL_QUOTES: List[str] = [
     "🔥 <i>«Тот, кто никогда не падал, никогда не поднимался. Сделай паузу и верни своё!»</i>",
@@ -168,6 +173,11 @@ def fmt_num(val: Any) -> str:
 def get_mention(user_id: int, name: Optional[str]) -> str:
     safe_name = html.escape(str(name or "Игрок"))
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+def get_plain_name(name: Optional[str]) -> str:
+    """Безопасное отображение имени БЕЗ тега и кликабельной ссылки."""
+    return html.escape(str(name or "Аноним"))
 
 
 def parse_amount_string(val_str: Optional[Any], current_balance: int = 0) -> Optional[int]:
@@ -292,13 +302,11 @@ def top_menu_keyboard(current_tab: str = "balance"):
     b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
     t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
     w_text = "🏆 Победы 🟢" if current_tab == "wins" else "🏆 Победы"
-    r_text = "🎯 Винрейт 🟢" if current_tab == "winrate" else "🎯 Винрейт"
 
     builder.button(text=b_text, callback_data="top_tab_balance")
     builder.button(text=t_text, callback_data="top_tab_turnover")
     builder.button(text=w_text, callback_data="top_tab_wins")
-    builder.button(text=r_text, callback_data="top_tab_winrate")
-    builder.adjust(2, 2)
+    builder.adjust(3)
     return builder.as_markup()
 
 
@@ -409,7 +417,7 @@ async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
         return await message.reply(text=text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
-        logging.warning(f"Ошибка HTML-парсера ({e}), отправка обычным текстом...")
+        logging.warning(f"Ошибка HTML-парсера ({e}), отправка текстом...")
         clean_text = re.sub(r'<[^>]+>', '', text)
         return await message.reply(text=clean_text, reply_markup=reply_markup)
 
@@ -436,7 +444,22 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
     if not final_markup and game_type and bet and user_id:
         final_markup = replay_keyboard(game_type, bet, user_id)
 
-    # Надёжная отправка текстом, исключающая любые сбои внешних ссылок на фото
+    img_map = {"win": IMG_WIN, "loss": IMG_LOSS, "draw": IMG_DRAW}
+    photo_url = img_map.get(result_type)
+
+    if photo_url:
+        try:
+            photo_file = URLInputFile(photo_url)
+            await message.reply_photo(
+                photo=photo_file,
+                caption=full_caption,
+                parse_mode="HTML",
+                reply_markup=final_markup
+            )
+            return
+        except Exception as e:
+            logging.warning(f"Ошибка отправки URLInputFile ({e}), переход на текст.")
+
     await safe_reply(message, full_caption, reply_markup=final_markup)
 
 
@@ -789,17 +812,6 @@ class Database:
             """, limit)
             return [dict(r) for r in rows]
 
-    async def get_top_winrate(self, limit=10):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT user_id, username, custom_nick, wins, losses, draws 
-                FROM users 
-                WHERE (wins + losses + draws) >= 3 
-                ORDER BY (CAST(wins AS FLOAT) / (wins + losses + draws)) DESC, wins DESC, user_id ASC
-                LIMIT $1
-            """, limit)
-            return [dict(r) for r in rows]
-
     async def get_chat_stats(self, chat_id: int):
         async with self.pool.acquire() as conn:
             stats = await conn.fetchrow("""
@@ -940,7 +952,7 @@ class Database:
 db: Database = Database(DATABASE_URL)
 
 
-# ================= КАПЧА =================
+# ================= КАПЧА: ЛЁГКАЯ (3 ПОПЫТКИ) =================
 async def captcha_timeout_watcher(chat_id: int, user_id: int, msg_id: int):
     await asyncio.sleep(90)
     key = f"{chat_id}_{user_id}"
@@ -981,13 +993,12 @@ async def cb_handle_captcha(call: CallbackQuery):
     if not captcha_data:
         return await call.answer("❌ Время на решение истекло или проверка пройдена!", show_alert=True)
 
-    task_obj = captcha_data.get("task")
-    if task_obj and not task_obj.done():
-        task_obj.cancel()
-
-    pending_captchas.pop(key, None)
-
     if selected_ans == captcha_data["correct"]:
+        task_obj = captcha_data.get("task")
+        if task_obj and not task_obj.done():
+            task_obj.cancel()
+        pending_captchas.pop(key, None)
+
         try:
             unmute_perms = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
@@ -1012,20 +1023,45 @@ async def cb_handle_captcha(call: CallbackQuery):
         )
         await call.answer("✅ Капча пройдена!")
     else:
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        try:
-            await bot.ban_chat_member(chat_id=chat_id, user_id=target_user_id)
-            await bot.unban_chat_member(chat_id=chat_id, user_id=target_user_id)
-            await call.message.answer(
-                f"❌ Пользователь {get_mention(target_user_id, call.from_user.full_name)} дал неверный ответ на пример и был исключён!",
-                parse_mode="HTML"
+        captcha_data["attempts"] -= 1
+        rem = captcha_data["attempts"]
+
+        if rem > 0:
+            await call.answer(f"❌ Неверно! Осталось попыток: {rem}", show_alert=True)
+            mention = get_mention(target_user_id, call.from_user.full_name)
+            n1, n2 = captcha_data["n1"], captcha_data["n2"]
+            new_text = (
+                f"🛡 <b>ПРОВЕРКА НА БОТА / КАПЧА</b>\n\n"
+                f"👋 Добро пожаловать, {mention}!\n"
+                f"Решите простой пример:\n\n"
+                f"👉 <b>{n1} + {n2} = ?</b>\n\n"
+                f"⚠️ <b>Осталось попыток: {rem}/3</b>\n"
+                f"⏱ <i>У вас есть 90 секунд, иначе вы будете исключены.</i>"
             )
-        except Exception:
-            pass
-        await call.answer("❌ Неверный ответ!", show_alert=True)
+            try:
+                await call.message.edit_text(new_text, parse_mode="HTML", reply_markup=call.message.reply_markup)
+            except Exception:
+                pass
+        else:
+            task_obj = captcha_data.get("task")
+            if task_obj and not task_obj.done():
+                task_obj.cancel()
+            pending_captchas.pop(key, None)
+
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+            try:
+                await bot.ban_chat_member(chat_id=chat_id, user_id=target_user_id)
+                await bot.unban_chat_member(chat_id=chat_id, user_id=target_user_id)
+                await call.message.answer(
+                    f"❌ Пользователь {get_mention(target_user_id, call.from_user.full_name)} исчерпал все 3 попытки и был исключён!",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            await call.answer("❌ Вы исчерпали все попытки!", show_alert=True)
 
 
 @dp.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
@@ -1047,11 +1083,12 @@ async def on_user_join_instant_captcha(event: ChatMemberUpdated):
     except Exception:
         pass
 
-    n1, n2 = random.randint(10, 50), random.randint(5, 45)
+    # Легкий пример в пределах чисел от 1 до 9
+    n1, n2 = random.randint(1, 9), random.randint(1, 9)
     correct_ans = n1 + n2
     fake_answers = set()
     while len(fake_answers) < 3:
-        fake = correct_ans + random.choice([-10, -5, -2, -1, 1, 2, 5, 10])
+        fake = correct_ans + random.choice([-3, -2, -1, 1, 2, 3])
         if fake != correct_ans and fake > 0:
             fake_answers.add(fake)
 
@@ -1061,10 +1098,10 @@ async def on_user_join_instant_captcha(event: ChatMemberUpdated):
     mention = get_mention(new_member.id, new_member.full_name)
     captcha_text = (
         f"🛡 <b>ПРОВЕРКА НА БОТА / КАПЧА</b>\n\n"
-        f"👋 Добро пожаловать в беседу, {mention}!\n"
-        f"Чтобы получить возможность писать сообщения, решите пример:\n\n"
+        f"👋 Добро пожаловать, {mention}!\n"
+        f"Решите простой пример:\n\n"
         f"👉 <b>{n1} + {n2} = ?</b>\n\n"
-        f"⏱ <i>У вас есть 90 секунд, иначе вы будете исключены.</i>"
+        f"💡 <i>У вас есть 3 попытки и 90 секунд.</i>"
     )
 
     try:
@@ -1081,6 +1118,9 @@ async def on_user_join_instant_captcha(event: ChatMemberUpdated):
         )
         pending_captchas[key] = {
             "correct": correct_ans,
+            "n1": n1,
+            "n2": n2,
+            "attempts": 3,
             "task": timeout_task,
             "msg_id": sent_msg.message_id
         }
@@ -1704,10 +1744,6 @@ async def cb_sponsor_bonus_claim(call: CallbackQuery):
 
     if user.get("sponsor_bonus_claimed", False):
         return await call.answer("❌ Вы уже забрали этот бонус ранее!", show_alert=True)
-
-    is_sponsor_member = await check_channel_member(user_id, SPONSOR_CHANNEL)
-    if not is_sponsor_member:
-        return await call.answer(f"❌ Вы ещё не подписались на {SPONSOR_CHANNEL}!", show_alert=True)
 
     reward = 50000
     await db.change_balance(user_id, reward)
@@ -2610,7 +2646,8 @@ async def render_top_messages_text(chat_id: int, period: str = "all", chat_title
         place = medals.get(i, f"<b>{i}.</b>")
         display_name = r.get("custom_nick") or r.get("username") or "Участник"
         count = r["cnt"]
-        text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{fmt_num(count)}</b> сообщений\n"
+        # Отображение обычным текстом без создания тега-уведомления
+        text += f"{place} <b>{get_plain_name(display_name)}</b> — <b>{fmt_num(count)}</b> сообщений\n"
 
     return text
 
@@ -2655,7 +2692,8 @@ async def process_top_cmd(message: Message):
         for i, r in enumerate(rows, 1):
             place = medals.get(i, f"<b>{i}.</b>")
             display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-            text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['balance'])} 💰</code>\n"
+            # Отображение обычным текстом без создания тега-уведомления
+            text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['balance'])} 💰</code>\n"
 
     await safe_reply(message, text, reply_markup=top_menu_keyboard("balance"))
 
@@ -2675,7 +2713,7 @@ async def cb_top_pagination(call: CallbackQuery):
             for i, r in enumerate(rows, 1):
                 place = medals.get(i, f"<b>{i}.</b>")
                 display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['balance'])} 💰</code>\n"
+                text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['balance'])} 💰</code>\n"
 
     elif tab == "turnover":
         rows = await db.get_top_custom("turnover", 10)
@@ -2687,7 +2725,7 @@ async def cb_top_pagination(call: CallbackQuery):
             for i, r in enumerate(rows, 1):
                 place = medals.get(i, f"<b>{i}.</b>")
                 display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <code>{fmt_num(r['turnover'])} 💰</code>\n"
+                text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['turnover'])} 💰</code>\n"
 
     elif tab == "wins":
         rows = await db.get_top_custom("wins", 10)
@@ -2699,21 +2737,7 @@ async def cb_top_pagination(call: CallbackQuery):
             for i, r in enumerate(rows, 1):
                 place = medals.get(i, f"<b>{i}.</b>")
                 display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{r['wins']}</b> побед\n"
-
-    elif tab == "winrate":
-        rows = await db.get_top_winrate(10)
-        title = "🏆 <b>ТОП-10 УДАЧЛИВЫХ (ПО ВИНРЕЙТУ):</b>\n<i>(мин. 3 игры)</i>\n\n"
-        if not rows:
-            text = title + "<i>Список пуст.</i>"
-        else:
-            text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
-                total = r["wins"] + r["losses"] + r["draws"]
-                wr = round((r["wins"] / total * 100), 1) if total > 0 else 0
-                display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} {get_mention(r['user_id'], display_name)} — <b>{wr}%</b> побед <code>({r['wins']}/{total})</code>\n"
+                text += f"{place} <b>{get_plain_name(display_name)}</b> — <b>{r['wins']}</b> побед\n"
     else:
         text = "🏆 <b>Таблица лидеров</b>"
 
@@ -2819,7 +2843,7 @@ async def process_chat_stats_cmd(message: Message):
 
     top_text = "<i>Пока нет</i>"
     if top_player and top_player["user_id"]:
-        top_text = f"{get_mention(top_player['user_id'], top_player['username'])} (<code>{fmt_num(top_player['balance'])} 💰</code>)"
+        top_text = f"<b>{get_plain_name(top_player['username'])}</b> (<code>{fmt_num(top_player['balance'])} 💰</code>)"
 
     text = (
         f"📊 <b>ИГРОВАЯ СТАТИСТИКА ЧАТА</b>\n"
@@ -3324,7 +3348,7 @@ async def handle_all_text_commands(message: Message):
         return await safe_reply(message,
                                 f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!")
 
-    # 🎲 КУБЫ
+    # 🎲 ИГРА: КУБЫ (2 ДАЙСА)
     if first_word in ["кубы", "кубики", "кубсы", "дабл", "doubledice", "2dice", "дубль", "2кубика"]:
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username,
@@ -3344,7 +3368,7 @@ async def handle_all_text_commands(message: Message):
         if await check_bet_confirmation(message, user_id, display_name, bet, "doubledice", run_doubledice_game):
             return await run_doubledice_game(message, user_id, display_name, bet)
 
-    # 🎲 КУБИК
+    # 🎲 ИГРА: КУБИК (1 ДАЙС)
     if first_word in ["dice", "кубик", "кость", "кости", "куб"]:
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username,
@@ -3364,7 +3388,7 @@ async def handle_all_text_commands(message: Message):
         if await check_bet_confirmation(message, user_id, display_name, bet, "dice", run_dice_game):
             return await run_dice_game(message, user_id, display_name, bet)
 
-    # 🚀 ЛЕСЕНКА
+    # 🚀 ИГРА: ЛЕСЕНКА
     if first_word in ["ladder", "лесенка", "лестница", "ступень"]:
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username,
@@ -3388,7 +3412,7 @@ async def handle_all_text_commands(message: Message):
         if await check_bet_confirmation(message, user_id, display_name, bet, "ladder", run_ladder_game):
             return await run_ladder_game(message, user_id, display_name, bet)
 
-    # 📈 БОЛЬШЕ / МЕНЬШЕ / ЧЁТ / НЕЧЁТ
+    # 📈 ИГРА: БОЛЬШЕ / МЕНЬШЕ / ЧЁТ / НЕЧЁТ
     if first_word in ["over", "больше", "бол", "хай", "high"]:
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username,
