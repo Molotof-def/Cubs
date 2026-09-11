@@ -12,12 +12,14 @@ from typing import Dict, Optional, List, Tuple, Any
 import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
+from aiogram.filters import ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, ADMINISTRATOR
 from aiogram.types import (
     Message,
     CallbackQuery,
     ChatPermissions,
     BotCommand,
     TelegramObject,
+    ChatMemberUpdated,
     ChatMemberOwner,
     ChatMemberAdministrator,
     ChatMemberMember,
@@ -156,8 +158,6 @@ chat_recent_users: Dict[int, List[int]] = {}
 user_loss_streaks: Dict[int, int] = {}
 user_last_action: Dict[int, float] = {}
 check_cooldowns: Dict[int, float] = {}
-
-# Хранилище активных капч: key = f"{chat_id}_{user_id}"
 pending_captchas: Dict[str, dict] = {}
 
 
@@ -442,6 +442,7 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
     if not final_markup and game_type and bet and user_id:
         final_markup = replay_keyboard(game_type, bet, user_id)
 
+    # Безопасная отправка: сначала пробуем с фото, при малейшем сбое шлем надёжным текстом!
     if photo_url:
         try:
             await message.reply_photo(
@@ -949,9 +950,9 @@ class Database:
 db: Database = Database(DATABASE_URL)
 
 
-# ================= МАТЕМАТИЧЕСКАЯ КАПЧА ДЛЯ НОВЫХ УЧАСТНИКОВ =================
+# ================= МАТЕМАТИЧЕСКАЯ КАПЧА: ТАЙМАУТ И КЛИКИ =================
 async def captcha_timeout_watcher(chat_id: int, user_id: int, msg_id: int):
-    """Таймаут решения примера (90 секунд). Если не решил — кик/бан."""
+    """Таймаут решения примера (90 секунд). Если не успел — исключение."""
     await asyncio.sleep(90)
     key = f"{chat_id}_{user_id}"
     if key in pending_captchas:
@@ -997,9 +998,7 @@ async def cb_handle_captcha(call: CallbackQuery):
 
     pending_captchas.pop(key, None)
 
-    # Проверка ответа
     if selected_ans == captcha_data["correct"]:
-        # Возврат полных прав участнику
         try:
             unmute_perms = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
@@ -1007,7 +1006,6 @@ async def cb_handle_captcha(call: CallbackQuery):
                 can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
                 can_add_web_page_previews=True, can_invite_users=True
             )
-            await bot.set_chat_permissions(chat_id=chat_id, permissions=unmute_perms)
             await bot.restrict_chat_member(chat_id=chat_id, user_id=target_user_id, permissions=unmute_perms)
         except Exception:
             pass
@@ -1025,7 +1023,6 @@ async def cb_handle_captcha(call: CallbackQuery):
         )
         await call.answer("✅ Капча пройдена!")
     else:
-        # Неверный ответ -> исключение
         try:
             await call.message.delete()
         except Exception:
@@ -1040,6 +1037,88 @@ async def cb_handle_captcha(call: CallbackQuery):
         except Exception:
             pass
         await call.answer("❌ Неверный ответ!", show_alert=True)
+
+
+# ================= МГНОВЕННЫЙ ХЭНДЛЕР ВХОДА (ChatMemberUpdated) =================
+@dp.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
+async def on_user_join_instant_captcha(event: ChatMemberUpdated):
+    """Срабатывает СРАЗУ в ту же миллисекунду, как человека добавили в беседу!"""
+    chat = event.chat
+    new_member = event.new_chat_member.user
+
+    if new_member.is_bot:
+        return
+
+    known_groups.add(chat.id)
+
+    # 1. Сразу мутим новичка
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=new_member.id,
+            permissions=ChatPermissions(can_send_messages=False)
+        )
+    except Exception:
+        pass
+
+    # 2. Генерируем пример
+    n1, n2 = random.randint(10, 50), random.randint(5, 45)
+    correct_ans = n1 + n2
+    fake_answers = set()
+    while len(fake_answers) < 3:
+        fake = correct_ans + random.choice([-10, -5, -2, -1, 1, 2, 5, 10])
+        if fake != correct_ans and fake > 0:
+            fake_answers.add(fake)
+
+    options = list(fake_answers) + [correct_ans]
+    random.shuffle(options)
+
+    mention = get_mention(new_member.id, new_member.full_name)
+    captcha_text = (
+        f"🛡 <b>ПРОВЕРКА НА БОТА / КАПЧА</b>\n\n"
+        f"👋 Добро пожаловать в беседу, {mention}!\n"
+        f"Чтобы получить возможность писать сообщения, решите пример:\n\n"
+        f"👉 <b>{n1} + {n2} = ?</b>\n\n"
+        f"⏱ <i>У вас есть 90 секунд, иначе вы будете исключены.</i>"
+    )
+
+    try:
+        sent_msg = await bot.send_message(
+            chat_id=chat.id,
+            text=captcha_text,
+            parse_mode="HTML",
+            reply_markup=captcha_keyboard(new_member.id, options)
+        )
+
+        key = f"{chat.id}_{new_member.id}"
+        timeout_task = asyncio.create_task(
+            captcha_timeout_watcher(chat.id, new_member.id, sent_msg.message_id)
+        )
+        pending_captchas[key] = {
+            "correct": correct_ans,
+            "task": timeout_task,
+            "msg_id": sent_msg.message_id
+        }
+    except Exception as e:
+        logging.warning(f"Не удалось отправить капчу: {e}")
+
+
+@dp.my_chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> (IS_MEMBER | ADMINISTRATOR)))
+async def on_bot_added_to_chat(event: ChatMemberUpdated):
+    """Срабатывает при добавлении самого бота в новую группу."""
+    chat = event.chat
+    known_groups.add(chat.id)
+    try:
+        welcome_text = (
+            f"👑 <b>DUEL CUBES | ИГРОВОЙ БОТ ПОДКЛЮЧЕН!</b>\n\n"
+            f"👋 Привет, <b>{html.escape(chat.title or 'Чат')}</b>!\n"
+            f"🎲 Я игровой бот для кубиков, дуэлей 1v1, чеков и модерации.\n\n"
+            f"🛡 <i>Для полноценной работы (капча, мут, бан) выдайте боту права администратора.</i>\n"
+            f"💡 Напишите <code>/start</code> для меню или <code>правила</code> для правил."
+        )
+        await bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
+    except Exception:
+        pass
 
 
 # ================= АВТО-ВОЗВРАТ ЛЕСЕНКИ (3 МИНУТЫ) =================
@@ -1169,61 +1248,6 @@ class ChatActivityMiddleware(BaseMiddleware):
 
             if chat and chat.type in ["group", "supergroup"]:
                 known_groups.add(chat.id)
-
-                # Вход нового участника: МАТЕМАТИЧЕСКАЯ КАПЧА
-                if event.new_chat_members:
-                    for new_member in event.new_chat_members:
-                        if not new_member.is_bot:
-                            # 1. Мут новичку до решения примера
-                            try:
-                                await bot.restrict_chat_member(
-                                    chat_id=chat.id,
-                                    user_id=new_member.id,
-                                    permissions=ChatPermissions(can_send_messages=False)
-                                )
-                            except Exception:
-                                pass
-
-                            # 2. Генерация примера
-                            n1, n2 = random.randint(10, 50), random.randint(5, 45)
-                            correct_ans = n1 + n2
-                            fake_answers = set()
-                            while len(fake_answers) < 3:
-                                fake = correct_ans + random.choice([-10, -5, -2, -1, 1, 2, 5, 10])
-                                if fake != correct_ans and fake > 0:
-                                    fake_answers.add(fake)
-
-                            options = list(fake_answers) + [correct_ans]
-                            random.shuffle(options)
-
-                            mention = get_mention(new_member.id, new_member.full_name)
-                            captcha_text = (
-                                f"🛡 <b>ПРОВЕРКА НА БОТА / КАПЧА</b>\n\n"
-                                f"👋 Добро пожаловать, {mention}!\n"
-                                f"Чтобы писать сообщения в чате, решите простой пример:\n\n"
-                                f"👉 <b>{n1} + {n2} = ?</b>\n\n"
-                                f"⏱ <i>У вас есть 90 секунд, иначе вы будете исключены.</i>"
-                            )
-
-                            try:
-                                sent_msg = await event.answer(
-                                    captcha_text,
-                                    parse_mode="HTML",
-                                    reply_markup=captcha_keyboard(new_member.id, options)
-                                )
-
-                                key = f"{chat.id}_{new_member.id}"
-                                timeout_task = asyncio.create_task(
-                                    captcha_timeout_watcher(chat.id, new_member.id, sent_msg.message_id)
-                                )
-                                pending_captchas[key] = {
-                                    "correct": correct_ans,
-                                    "task": timeout_task,
-                                    "msg_id": sent_msg.message_id
-                                }
-                            except Exception:
-                                pass
-                    return
 
                 if event.left_chat_member:
                     return
@@ -2509,7 +2533,11 @@ async def on_startup(bot: Bot):
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
         logging.info(f"Установка Webhook: {webhook_url}")
-        await bot.set_webhook(webhook_url, drop_pending_updates=True)
+        await bot.set_webhook(
+            webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
+        )
     else:
         logging.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме.")
 
@@ -2533,7 +2561,7 @@ def main():
             await db.init()
             await bot.delete_webhook(drop_pending_updates=True)
             logging.info("🚀 Запуск в режиме Polling...")
-            await dp.start_polling(bot)
+            await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
 
         asyncio.run(run_polling())
 
