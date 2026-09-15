@@ -176,7 +176,6 @@ def get_mention(user_id: int, name: Optional[str]) -> str:
 
 
 def get_plain_name(name: Optional[str]) -> str:
-    """Безопасное отображение имени БЕЗ тега и кликабельной ссылки."""
     return html.escape(str(name or "Аноним"))
 
 
@@ -300,13 +299,13 @@ def report_admin_keyboard(target_id: int):
 def top_menu_keyboard(current_tab: str = "balance"):
     builder = InlineKeyboardBuilder()
     b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
-    t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
+    t_text = "🔄 Оборот (с 4-го места) 🟢" if current_tab == "turnover" else "🔄 Оборот (с 4-го места)"
     w_text = "🏆 Победы 🟢" if current_tab == "wins" else "🏆 Победы"
 
     builder.button(text=b_text, callback_data="top_tab_balance")
     builder.button(text=t_text, callback_data="top_tab_turnover")
     builder.button(text=w_text, callback_data="top_tab_wins")
-    builder.adjust(3)
+    builder.adjust(1, 2)
     return builder.as_markup()
 
 
@@ -469,7 +468,6 @@ class Database:
 
     async def init(self):
         clean_url = self.db_url.replace("postgres://", "postgresql://", 1)
-        # Оптимизированный пул соединений
         self.pool = await asyncpg.create_pool(
             dsn=clean_url,
             min_size=5,
@@ -670,6 +668,16 @@ class Database:
             rows = await conn.fetch("SELECT user_id FROM users")
             return [r["user_id"] for r in rows]
 
+    async def get_all_users_detailed(self) -> List[dict]:
+        """Возвращает всех пользователей для секретной админской команды /users."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT user_id, username, tg_username, custom_nick, balance 
+                FROM users 
+                ORDER BY created_at DESC
+            """)
+            return [dict(r) for r in rows]
+
     async def get_all_chat_ids(self) -> List[int]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT DISTINCT chat_id FROM chat_members WHERE chat_id < 0")
@@ -795,7 +803,7 @@ class Database:
         async with self.pool.acquire() as conn:
             return await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id = $1", user_id) or 0
 
-    async def get_top_custom(self, column: str, limit=10):
+    async def get_top_custom(self, column: str, limit=10, offset=0):
         if column not in ["balance", "turnover", "wins"]:
             column = "balance"
         async with self.pool.acquire() as conn:
@@ -803,8 +811,8 @@ class Database:
                 SELECT user_id, username, custom_nick, {column} 
                 FROM users 
                 ORDER BY {column} DESC, user_id ASC 
-                LIMIT $1
-            """, limit)
+                LIMIT $1 OFFSET $2
+            """, limit, offset)
             return [dict(r) for r in rows]
 
     async def get_chat_stats(self, chat_id: int):
@@ -1075,7 +1083,6 @@ async def on_user_join_instant_captcha(event: ChatMemberUpdated):
     except Exception:
         pass
 
-    # Легкий пример в пределах 1-9
     n1, n2 = random.randint(1, 9), random.randint(1, 9)
     correct_ans = n1 + n2
     fake_answers = set()
@@ -1135,6 +1142,37 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
         await bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
     except Exception:
         pass
+
+
+# ================= СЕКРЕТНЫЙ СПИСОК ВСЕХ ИГРОКОВ (/users) =================
+async def process_secret_users_cmd(message: Message):
+    if message.chat.type != "private":
+        return await safe_reply(message, "❌ Эта команда доступна строго в личных сообщениях боту!")
+
+    if not await db.can_give_money(message.from_user.id):
+        return await safe_reply(message, "❌ Доступ разрешён только <b>Создателю и Разработчику</b>!")
+
+    users = await db.get_all_users_detailed()
+    if not users:
+        return await safe_reply(message, "📂 В базе данных пока нет зарегистрированных игроков.")
+
+    total_count = len(users)
+    lines = []
+    
+    for i, u in enumerate(users, 1):
+        uid = u["user_id"]
+        display_name = u["custom_nick"] or u["username"] or "Без имени"
+        tag = f"@{u['tg_username']}" if u.get("tg_username") else "<i>(нет юзернейма)</i>"
+        bal = fmt_num(u["balance"])
+        lines.append(f"{i}. <b>{html.escape(display_name)}</b> ({tag})\n   🆔 <code>{uid}</code> | 💰 <code>{bal}</code>")
+
+    chunk_size = 35
+    for chunk_idx in range(0, len(lines), chunk_size):
+        chunk = lines[chunk_idx:chunk_idx + chunk_size]
+        header = f"👥 <b>СПИСОК ИГРОКОВ (Всего в базе: {fmt_num(total_count)}):</b>\n━━━━━━━━━━━━━━━━━━━━\n" if chunk_idx == 0 else ""
+        text = header + "\n".join(chunk)
+        await message.answer(text, parse_mode="HTML")
+        await asyncio.sleep(0.04)
 
 
 # ================= АВТО-ВОЗВРАТ ЛЕСЕНКИ (3 МИНУТЫ) =================
@@ -1373,7 +1411,8 @@ def format_admin_stats_text(s: dict) -> str:
         f"• Поражений игроков: <b>{fmt_num(s['total_losses'])}</b>\n"
         f"• Ничьих: <b>{fmt_num(s['total_draws'])}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>💡 Для просмотра ссылок на все беседы пиши в ЛС: <code>/chats</code></i>"
+        f"<i>💡 Для просмотра ссылок на все беседы пиши в ЛС: <code>/chats</code></i>\n"
+        f"<i>👥 Для просмотра списка игроков с юзернеймами пиши в ЛС: <code>/users</code></i>"
     )
 
 
@@ -2179,7 +2218,6 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
     if user_bal < bet:
         return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
 
-    # Списываем ставку
     await db.change_balance(user_id, -bet)
     await db.add_turnover(user_id, bet)
 
@@ -2666,7 +2704,6 @@ async def render_top_messages_text(chat_id: int, period: str = "all", chat_title
         place = medals.get(i, f"<b>{i}.</b>")
         display_name = r.get("custom_nick") or r.get("username") or "Участник"
         count = r["cnt"]
-        # Отображение обычным текстом без создания тега-уведомления
         text += f"{place} <b>{get_plain_name(display_name)}</b> — <b>{fmt_num(count)}</b> сообщений\n"
 
     return text
@@ -2734,16 +2771,16 @@ async def cb_top_pagination(call: CallbackQuery):
                 text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['balance'])} 💰</code>\n"
 
     elif tab == "turnover":
-        rows = await db.get_top_custom("turnover", 10)
-        title = "🏆 <b>ТОП-10 ИГРОКОВ (ПО ОБОРОТУ):</b>\n\n"
+        # Убраны первые 3 места (OFFSET 3), нумерация с 4-го места
+        rows = await db.get_top_custom("turnover", limit=10, offset=3)
+        title = "🏆 <b>ТОП ИГРОКОВ (ПО ОБОРОТУ):</b>\n<i>(места с 4 по 13)</i>\n\n"
         if not rows:
             text = title + "<i>Список пуст.</i>"
         else:
             text = title
-            for i, r in enumerate(rows, 1):
-                place = medals.get(i, f"<b>{i}.</b>")
+            for i, r in enumerate(rows, 4):
                 display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['turnover'])} 💰</code>\n"
+                text += f"<b>{i}.</b> <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['turnover'])} 💰</code>\n"
 
     elif tab == "wins":
         rows = await db.get_top_custom("wins", 10)
@@ -3027,9 +3064,12 @@ async def handle_all_text_commands(message: Message):
         await db.set_chat_rp(message.chat.id, True)
         return await safe_reply(message, "🔊 <b>RP-команды в этом чате успешно включены (+рп)!</b>")
 
-    # 4. Секретный просмотр чатов бота в ЛС
+    # 4. Секретный просмотр чатов и игроков в ЛС (ТОЛЬКО ДЛЯ АДМИНА)
     if full_lower in ["/chats", "/mychats", "чаты", "все чаты", "список чатов", "база чатов"]:
         return await process_secret_chats_cmd(message)
+
+    if full_lower in ["/users", "/allusers", "юзеры", "игроки", "все игроки", "список игроков"]:
+        return await process_secret_users_cmd(message)
 
     # 5. Админ-панель
     if full_lower in ["/admin_stats", "/admin", "админ стата", "панель", "админка"]:
