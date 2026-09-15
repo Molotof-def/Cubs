@@ -153,6 +153,7 @@ active_ladders: Dict[int, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_quizzes: Dict[int, dict] = {}
 pending_confirmations: Dict[str, dict] = {}
+pending_marriages: Dict[str, dict] = {}
 known_groups: set = set()
 chat_recent_users: Dict[int, List[int]] = {}
 user_loss_streaks: Dict[int, int] = {}
@@ -287,6 +288,14 @@ def confirm_bet_keyboard(conf_id: str):
     return builder.as_markup()
 
 
+def marriage_keyboard(marriage_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💍 Согласен(на)!", callback_data=f"mrg_yes_{marriage_id}")
+    builder.button(text="💔 Отказать", callback_data=f"mrg_no_{marriage_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def report_admin_keyboard(target_id: int):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔇 Мут 30 мин", callback_data=f"adm_mute_{target_id}_1800")
@@ -299,13 +308,13 @@ def report_admin_keyboard(target_id: int):
 def top_menu_keyboard(current_tab: str = "balance"):
     builder = InlineKeyboardBuilder()
     b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
-    t_text = "🔄 Оборот (с 4-го места) 🟢" if current_tab == "turnover" else "🔄 Оборот (с 4-го места)"
+    t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
     w_text = "🏆 Победы 🟢" if current_tab == "wins" else "🏆 Победы"
 
     builder.button(text=b_text, callback_data="top_tab_balance")
     builder.button(text=t_text, callback_data="top_tab_turnover")
     builder.button(text=w_text, callback_data="top_tab_wins")
-    builder.adjust(1, 2)
+    builder.adjust(3)
     return builder.as_markup()
 
 
@@ -489,6 +498,7 @@ class Database:
                     losses INT DEFAULT 0,
                     draws INT DEFAULT 0,
                     warns INT DEFAULT 0,
+                    spouse_id BIGINT DEFAULT NULL,
                     last_work_time TIMESTAMP DEFAULT NULL,
                     sponsor_bonus_claimed BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -497,6 +507,7 @@ class Database:
 
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_nick TEXT DEFAULT NULL;")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_promos TEXT[] DEFAULT ARRAY[]::TEXT[];")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS spouse_id BIGINT DEFAULT NULL;")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_admins (
@@ -669,7 +680,6 @@ class Database:
             return [r["user_id"] for r in rows]
 
     async def get_all_users_detailed(self) -> List[dict]:
-        """Возвращает всех пользователей для секретной админской команды /users."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT user_id, username, tg_username, custom_nick, balance 
@@ -689,11 +699,25 @@ class Database:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT user_id, username, balance, turnover, wins, losses, draws, warns, 
-                       referrer_id, last_work_time, sponsor_bonus_claimed, created_at, 
+                       referrer_id, spouse_id, last_work_time, sponsor_bonus_claimed, created_at, 
                        tg_username, custom_nick, claimed_promos 
                 FROM users WHERE user_id = $1
             """, user_id)
             return dict(row) if row else None
+
+    async def set_marriage(self, user_id: int, partner_id: Optional[int]):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET spouse_id = $1 WHERE user_id = $2", partner_id, user_id)
+            if partner_id:
+                await conn.execute("UPDATE users SET spouse_id = $1 WHERE user_id = $2", user_id, partner_id)
+
+    async def divorce(self, user_id: int) -> Optional[int]:
+        async with self.pool.acquire() as conn:
+            spouse_id = await conn.fetchval("SELECT spouse_id FROM users WHERE user_id = $1", user_id)
+            if spouse_id:
+                await conn.execute("UPDATE users SET spouse_id = NULL WHERE user_id = $1", user_id)
+                await conn.execute("UPDATE users SET spouse_id = NULL WHERE user_id = $1", spouse_id)
+            return spouse_id
 
     async def claim_promo(self, user_id: int, code: str, reward: int) -> bool:
         async with self.pool.acquire() as conn:
@@ -1135,7 +1159,7 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
         welcome_text = (
             f"👑 <b>DUEL CUBES | ИГРОВОЙ БОТ ПОДКЛЮЧЕН!</b>\n\n"
             f"👋 Привет, <b>{html.escape(chat.title or 'Чат')}</b>!\n"
-            f"🎲 Я игровой бот для кубиков, дуэлей 1v1, чеков и модерации.\n\n"
+            f"🎲 Я игровой бот для кубиков, слотов, дуэлей 1v1, чеков и свадеб.\n\n"
             f"🛡 <i>Для полноценной работы (капча, мут, бан) выдайте боту права администратора.</i>\n"
             f"💡 Напишите <code>/start</code> для меню или <code>правила</code> для правил."
         )
@@ -1173,6 +1197,206 @@ async def process_secret_users_cmd(message: Message):
         text = header + "\n".join(chunk)
         await message.answer(text, parse_mode="HTML")
         await asyncio.sleep(0.04)
+
+
+# ================= СИСТЕМА БРАКОВ И СВАДЕБ =================
+async def process_marriage_proposal(message: Message, args: List[str]):
+    if message.chat.type not in ["group", "supergroup"]:
+        return await safe_reply(message, "❌ Свадьбы и браки доступны только в группах!")
+
+    sender = message.from_user
+    sender_data = await db.get_user(sender.id)
+    if not sender_data:
+        await db.register_user(sender.id, sender.full_name, sender.username)
+        sender_data = await db.get_user(sender.id)
+
+    if sender_data.get("spouse_id"):
+        return await safe_reply(message, "❌ Вы уже состоите в браке! Напишите <code>развод</code>, чтобы стать свободным.")
+
+    target_id, target_name = await resolve_rp_target(message, args)
+    if not target_id:
+        return await safe_reply(message, "❌ Укажите игрока: <code>брак @username</code> или ответом на сообщение.")
+
+    if target_id == sender.id:
+        return await safe_reply(message, "❌ Нельзя заключить брак с самим собой!")
+
+    if target_id == (await bot.get_me()).id:
+        return await safe_reply(message, "🤖 Бот польщён, но его сердце принадлежит азарту и кубикам!")
+
+    target_data = await db.get_user(target_id)
+    if not target_data:
+        return await safe_reply(message, "❌ Этот игрок ещё ни разу не играл с ботом!")
+
+    if target_data.get("spouse_id"):
+        return await safe_reply(message, f"❌ {get_mention(target_id, target_name)} уже состоит в браке!")
+
+    cost = 25000
+    if sender_data["balance"] < cost:
+        return await safe_reply(message, f"❌ Свадьба стоит <b>{fmt_num(cost)} 💰</b>. У вас недостаточно средств на балансе!")
+
+    marriage_id = uuid.uuid4().hex[:8]
+    s_name = sender_data.get("custom_nick") or sender.full_name
+
+    pending_marriages[marriage_id] = {
+        "proposer_id": sender.id,
+        "proposer_name": s_name,
+        "partner_id": target_id,
+        "partner_name": target_name,
+        "cost": cost
+    }
+
+    text = (
+        f"💍 <b>ПРЕДЛОЖЕНИЕ РУКИ И СЕРДЦА!</b>\n\n"
+        f"💘 {get_mention(sender.id, s_name)} сделал(а) предложение {get_mention(target_id, target_name)}!\n"
+        f"💵 Стоимость бракосочетания: <b>{fmt_num(cost)} 💰</b>\n\n"
+        f"<i>{get_mention(target_id, target_name)}, согласны ли вы связать свои судьбы узами брака?</i>"
+    )
+    await safe_reply(message, text, reply_markup=marriage_keyboard(marriage_id))
+
+
+@dp.callback_query(F.data.startswith("mrg_yes_"))
+async def cb_marriage_yes(call: CallbackQuery):
+    m_id = call.data.replace("mrg_yes_", "")
+    proposal = pending_marriages.get(m_id)
+    if not proposal:
+        return await call.answer("❌ Предложение устарело!", show_alert=True)
+
+    if call.from_user.id != proposal["partner_id"]:
+        return await call.answer("❌ Это предложение сделано не вам!", show_alert=True)
+
+    p_id = proposal["proposer_id"]
+    u_id = proposal["partner_id"]
+    cost = proposal["cost"]
+
+    p_data = await db.get_user(p_id)
+    if not p_data or p_data["balance"] < cost:
+        pending_marriages.pop(m_id, None)
+        return await call.message.edit_text("❌ У того, кто делал предложение, больше нет средств на свадьбу!", parse_mode="HTML")
+
+    if p_data.get("spouse_id") or (await db.get_user(u_id)).get("spouse_id"):
+        pending_marriages.pop(m_id, None)
+        return await call.message.edit_text("❌ Один из игроков уже успел вступить в брак!", parse_mode="HTML")
+
+    await db.change_balance(p_id, -cost)
+    await db.set_marriage(p_id, u_id)
+    pending_marriages.pop(m_id, None)
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    text = (
+        f"🎉💒 <b>ГОРЬКО! СВАДЬБА СОСТОЯЛАСЬ!</b>\n\n"
+        f"💍 {get_mention(p_id, proposal['proposer_name'])} и {get_mention(u_id, proposal['partner_name'])} теперь официально муж и жена!\n"
+        f"✨ Поздравляем молодоженов! За статус брака с баланса списано: <code>{fmt_num(cost)} 💰</code>."
+    )
+    await call.message.answer(text, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("mrg_no_"))
+async def cb_marriage_no(call: CallbackQuery):
+    m_id = call.data.replace("mrg_no_", "")
+    proposal = pending_marriages.pop(m_id, None)
+    if not proposal:
+        return await call.answer("❌ Предложение устарело!", show_alert=True)
+
+    if call.from_user.id != proposal["partner_id"]:
+        return await call.answer("❌ Это предложение сделано не вам!", show_alert=True)
+
+    try:
+        await call.message.edit_text(
+            f"💔 {get_mention(proposal['partner_id'], proposal['partner_name'])} отклонил(а) предложение руки и сердца.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+    await call.answer("Вы отклонили предложение.")
+
+
+async def process_divorce(message: Message):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user.get("spouse_id"):
+        return await safe_reply(message, "❌ Вы не состоите в браке!")
+
+    spouse_id = await db.divorce(user_id)
+    u_name = user.get("custom_nick") or message.from_user.full_name
+    spouse_data = await db.get_user(spouse_id)
+    s_name = (spouse_data.get("custom_nick") or spouse_data.get("username")) if spouse_data else "Партнёр"
+
+    text = (
+        f"💔 <b>ОФИЦИАЛЬНЫЙ РАЗВОД</b>\n\n"
+        f"👤 {get_mention(user_id, u_name)} расторг(ла) брак с {get_mention(spouse_id, s_name)}.\n"
+        f"🕊 Теперь вы оба снова свободны!"
+    )
+    await safe_reply(message, text)
+
+
+# ================= ИГРА: СЛОТ-МАШИНА 🎰 (FAIL-SAFE) =================
+async def run_slots_game(message: Message, user_id: int, user_name: str, bet: int):
+    user = await db.get_user(user_id)
+    user_bal = user["balance"] if user else 0
+
+    if user_bal < bet:
+        return await safe_reply(message, f"❌ Недостаточно монет! Баланс: <b>{fmt_num(user_bal)} 💰</b>\n💡 Напишите <code>ворк</code> чтобы заработать!")
+
+    await db.change_balance(user_id, -bet)
+    await db.add_turnover(user_id, bet)
+
+    display_name = user.get("custom_nick") or user_name
+    is_allin = "🔥 <b>ALL-IN (ВА-БАНК)!</b>\n" if bet == user_bal else ""
+
+    try:
+        await safe_reply(message, f"{is_allin}🎰 <b>Крутим барабаны слотов для {get_mention(user_id, display_name)} (Ставка: {fmt_num(bet)} 💰):</b>")
+        slot_msg = await message.answer_dice(emoji="🎰")
+        await asyncio.sleep(3.3)
+        val = int(slot_msg.dice.value)
+
+        # Telegram Dice 🎰 значения от 1 до 64
+        # 1: BAR/BAR/BAR, 22: Виноград/Виноград/Виноград, 43: Лимон/Лимон/Лимон, 64: 7/7/7
+        win_mult = 0.0
+        win_title = ""
+
+        if val == 64:
+            win_mult = 15.0
+            win_title = "💥🔥 <b>МЕГА ДЖЕКПОТ! ТРИ СЕМЁРКИ (777)!</b> 🔥💥\n"
+        elif val in [1, 22, 43]:
+            win_mult = 5.0
+            win_title = "🎉 <b>ДЖЕКПОТ! ТРИ ОДИНАКОВЫХ СИМВОЛА!</b>\n"
+        elif val in [16, 32, 48]: # Двойные совпадения
+            win_mult = 1.5
+            win_title = "✨ <b>Линия совпала!</b>\n"
+
+        if win_mult > 0:
+            win = int(round(bet * win_mult))
+            await db.change_balance(user_id, win)
+            await db.record_game(user_id, "win")
+            res = (
+                f"👤 {get_mention(user_id, display_name)}\n"
+                f"{win_title}"
+                f"💰 Множитель: <b>x{win_mult}</b>\n"
+                f"💵 Зачислено на баланс: <b>+{fmt_num(win)} 💰</b>"
+            )
+            await send_game_result(message, "win", res, user_id=user_id, game_type="slots", bet=bet)
+        else:
+            await db.record_game(user_id, "loss")
+            await db.process_referral_loss(user_id, bet)
+            res = (
+                f"👤 {get_mention(user_id, display_name)}\n"
+                f"🎰 Барабаны не совпали!\n"
+                f"📉 Потеряно: <b>-{fmt_num(bet)} 💰</b>"
+            )
+            await send_game_result(message, "loss", res, user_id=user_id, game_type="slots", bet=bet)
+
+    except Exception as e:
+        logging.error(f"Сбой игры слоты у {user_id}: {e}")
+        await db.change_balance(user_id, bet)
+        await safe_reply(
+            message,
+            f"⚠️ <b>Произошёл сбой сети Telegram!</b>\n"
+            f"👤 {get_mention(user_id, display_name)}, ваша ставка <b>{fmt_num(bet)} 💰</b> автоматически возвращена на баланс."
+        )
 
 
 # ================= АВТО-ВОЗВРАТ ЛЕСЕНКИ (3 МИНУТЫ) =================
@@ -1288,6 +1512,7 @@ async def db_cleanup_background_worker():
         try:
             await db.cleanup_expired_duels()
             pending_confirmations.clear()
+            pending_marriages.clear()
         except Exception as e:
             logging.error(f"Ошибка фонового клинера базы: {e}")
         await asyncio.sleep(7200)
@@ -1465,6 +1690,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
         f"🎲 <b>Список игровых режимов:</b>\n"
         f"<blockquote expandable>"
+        f"🎰 <code>слоты [ставка/вабанк]</code> — Казино-слоты (до х15!)\n"
         f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека (бессрочный)\n"
         f"⚔️ <code>дуэль [ставка] @username</code> — дуэль 1v1\n"
         f"🎲 <code>кубик [ставка/вабанк]</code> — 1 кубик против бота\n"
@@ -1475,6 +1701,9 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётный кубик\n"
         f"🎯 <code>нечетное [ставка/вабанк]</code> — Нечётный кубик"
         f"</blockquote>\n\n"
+        f"💍 <b>Отношения и социалка:</b>\n"
+        f"├ 💘 <code>брак @username</code> — сделать предложение (25к 💰)\n"
+        f"└ 💔 <code>развод</code> — расторгнуть брак\n\n"
         f"📊 <b>Навигация и профиль:</b>\n"
         f"👤 <code>ник [имя]</code> — установить ник\n"
         f"👤 <code>профиль</code> | 🏆 <code>топ</code> | 💬 <code>топ сообщений</code>\n"
@@ -1524,10 +1753,17 @@ async def process_profile_cmd(message: Message, args: List[str]):
     elif await db.is_admin(view_user_id, message.chat.id):
         role_badge = "🛡 Администратор"
 
+    spouse_text = "Холост / свободна"
+    if user.get("spouse_id"):
+        sp_data = await db.get_user(user["spouse_id"])
+        sp_name = (sp_data.get("custom_nick") or sp_data.get("username")) if sp_data else "Партнёр"
+        spouse_text = f"💍 В браке с {get_mention(user['spouse_id'], sp_name)}"
+
     text = (
         f"┏ 👤 <b>Профиль:</b> {get_mention(view_user_id, display_name)}\n"
         f"┣ 🎖 <b>Статус:</b> <code>{role_badge}</code>\n"
         f"┣ 🆔 <b>ID:</b> <code>{view_user_id}</code>\n"
+        f"┣ 💖 <b>Отношения:</b> {spouse_text}\n"
         f"┣ 💰 <b>Баланс:</b> <code>{fmt_num(balance)} 💰</code>\n"
         f"┣ 🔄 <b>Оборот:</b> <code>{fmt_num(turnover)} 💰</code>\n"
         f"┣ 🎮 <b>Всего игр:</b> <code>{total_games}</code>\n"
@@ -2546,6 +2782,8 @@ async def cb_quick_replay(call: CallbackQuery):
         await run_dice_game(call.message, user_id, display_name, actual_bet)
     elif game_type == "doubledice":
         await run_doubledice_game(call.message, user_id, display_name, actual_bet)
+    elif game_type == "slots":
+        await run_slots_game(call.message, user_id, display_name, actual_bet)
     elif game_type in ["over", "under", "even", "odd"]:
         await run_simple_bet_game(call.message, user_id, display_name, actual_bet, game_type)
 
@@ -2771,16 +3009,17 @@ async def cb_top_pagination(call: CallbackQuery):
                 text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['balance'])} 💰</code>\n"
 
     elif tab == "turnover":
-        # Убраны первые 3 места (OFFSET 3), нумерация с 4-го места
-        rows = await db.get_top_custom("turnover", limit=10, offset=3)
-        title = "🏆 <b>ТОП ИГРОКОВ (ПО ОБОРОТУ):</b>\n<i>(места с 4 по 13)</i>\n\n"
+        # Начинаем строго с 1-го места
+        rows = await db.get_top_custom("turnover", limit=10, offset=0)
+        title = "🏆 <b>ТОП-10 ИГРОКОВ (ПО ОБОРОТУ):</b>\n\n"
         if not rows:
             text = title + "<i>Список пуст.</i>"
         else:
             text = title
-            for i, r in enumerate(rows, 4):
+            for i, r in enumerate(rows, 1):
+                place = medals.get(i, f"<b>{i}.</b>")
                 display_name = r.get("custom_nick") or r.get("username") or "Аноним"
-                text += f"<b>{i}.</b> <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['turnover'])} 💰</code>\n"
+                text += f"{place} <b>{get_plain_name(display_name)}</b> — <code>{fmt_num(r['turnover'])} 💰</code>\n"
 
     elif tab == "wins":
         rows = await db.get_top_custom("wins", 10)
@@ -3107,6 +3346,13 @@ async def handle_all_text_commands(message: Message):
     if full_lower in ["удалить ник", "сбросить ник", "снять ник"]:
         return await process_reset_nick_cmd(message)
 
+    # Браки и развод
+    if first_word in ["брак", "свадьба", "жениться", "пожениться"]:
+        return await process_marriage_proposal(message, args)
+
+    if full_lower in ["развод", "расстаться", "расторгнуть брак", "/divorce"]:
+        return await process_divorce(message)
+
     # Промокод
     if first_word in ["промо", "промик", "промокод", "promocode", "promo"]:
         code_val = args[0] if args else ""
@@ -3375,6 +3621,23 @@ async def handle_all_text_commands(message: Message):
         verb = "выдал" if amount >= 0 else "забрал"
         return await safe_reply(message, f"👑 Администратор {verb} <b>{fmt_num(abs(amount))} 💰</b> у {get_mention(target_id, target_name)}!")
 
+    # 🎰 ИГРА: СЛОТЫ / КАЗИНО
+    if first_word in ["slots", "слоты", "слот", "казино", "автомат", "автоматы"]:
+        user_id = message.from_user.id
+        await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
+        user = await db.get_user(user_id)
+        user_bal = int(user["balance"]) if user else 0
+        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
+
+        raw_bet_arg = args[0] if args else "100"
+        bet = parse_amount_string(raw_bet_arg, user_bal)
+        if bet is None:
+            return await safe_reply(message, "❌ <b>Укажите ставку!</b>\nФормат: <code>слоты 500</code>, <code>слоты 1кк</code> или <code>слоты вабанк</code>")
+        if bet < 100:
+            return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
+        if await check_bet_confirmation(message, user_id, display_name, bet, "slots", run_slots_game):
+            return await run_slots_game(message, user_id, display_name, bet)
+
     # 🎲 ИГРА: КУБЫ (2 ДАЙСА)
     if first_word in ["кубы", "кубики", "кубсы", "дабл", "doubledice", "2dice", "дубль", "2кубика"]:
         user_id = message.from_user.id
@@ -3506,6 +3769,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="rules", description="Правила чата 📜"),
         BotCommand(command="check", description="Создать чек-раздачу в чате 🎁"),
         BotCommand(command="report", description="Жалоба на нарушителя 🚨"),
+        BotCommand(command="slots", description="Казино-слоты 🎰"),
         BotCommand(command="dice", description="1 кубик против бота 🤖"),
         BotCommand(command="ladder", description="Кубическая лесенка до x7.5 🚀"),
         BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
