@@ -186,53 +186,54 @@ def get_plain_name(name: Optional[str]) -> str:
 def parse_amount_string(val_str: Optional[Any], current_balance: int = 0) -> Optional[int]:
     if val_str is None:
         return None
-    
-    clean = str(val_str).strip().lower().replace(",", ".").replace(" ", "")
-    allin_aliases = [
-        "вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", 
-        "фул", "макс", "max", "оллин", "all-in", "вабанком", "фуллом"
-    ]
-    if clean in allin_aliases:
-        return max(0, int(current_balance))
-
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zа-яА-Я]*)$", clean)
-    if not match:
-        return None
-
     try:
+        clean = str(val_str).strip().lower().replace(",", ".").replace(" ", "")
+        allin_aliases = [
+            "вабанк", "ва-банк", "все", "всё", "all", "full", "фулл", 
+            "фул", "макс", "max", "оллин", "all-in", "вабанком", "фуллом"
+        ]
+        if clean in allin_aliases:
+            return max(0, int(current_balance))
+
+        match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zа-яА-Я]*)$", clean)
+        if not match:
+            return None
+
         num_part = float(match.group(1))
         suffix = match.group(2)
 
         if not suffix:
-            return int(num_part)
+            return int(round(num_part))
         elif suffix in ["к", "k", "тыс", "тысяч", "тысячи", "тыща"]:
-            return int(num_part * 1_000)
+            return int(round(num_part * 1_000))
         elif suffix in ["кк", "kk", "м", "m", "млн", "миллион", "миллиона", "миллионов", "лям", "ляма", "лямов"]:
-            return int(num_part * 1_000_000)
+            return int(round(num_part * 1_000_000))
         elif suffix in ["ккк", "kkk", "b", "млрд", "миллиард", "миллиарда", "миллиардов"]:
-            return int(num_part * 1_000_000_000)
+            return int(round(num_part * 1_000_000_000))
     except Exception:
         return None
-    
     return None
 
 
 def parse_time_string(time_str: str) -> Optional[int]:
-    match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", str(time_str).strip().lower())
-    if not match:
+    try:
+        match = re.match(r"^(\d+)\s*([a-zA-Zа-яА-Я]*)$", str(time_str).strip().lower())
+        if not match:
+            return None
+        value = int(match.group(1))
+        unit = match.group(2)
+        if not unit or unit in ["м", "m", "мин", "min", "минут", "минуты"]:
+            return value * 60
+        elif unit in ["с", "s", "сек", "sec", "секунд"]:
+            return value
+        elif unit in ["ч", "h", "час", "часа", "часов", "hour"]:
+            return value * 3600
+        elif unit in ["д", "d", "день", "дня", "дней", "day"]:
+            return value * 86400
+        elif unit in ["н", "w", "нед", "неделя", "недели"]:
+            return value * 604800
+    except Exception:
         return None
-    value = int(match.group(1))
-    unit = match.group(2)
-    if not unit or unit in ["м", "m", "мин", "min", "минут", "минуты"]:
-        return value * 60
-    elif unit in ["с", "s", "сек", "sec", "секунд"]:
-        return value
-    elif unit in ["ч", "h", "час", "часа", "часов", "hour"]:
-        return value * 3600
-    elif unit in ["д", "d", "день", "дня", "дней", "day"]:
-        return value * 86400
-    elif unit in ["н", "w", "нед", "неделя", "недели"]:
-        return value * 604800
     return None
 
 
@@ -330,7 +331,7 @@ def top_menu_keyboard(current_tab: str = "balance"):
     return builder.as_markup()
 
 
-def top_messages_keyboard(chat_id: int, current_period: str = "all"):
+def top_messages_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
     builder.button(text="💬 Топ сообщений чата", callback_data=f"tmsg_{chat_id}_all")
     return builder.as_markup()
@@ -502,6 +503,7 @@ class Database:
                     draws INT DEFAULT 0,
                     warns INT DEFAULT 0,
                     spouse_id BIGINT DEFAULT NULL,
+                    marriage_date TIMESTAMP DEFAULT NULL,
                     last_work_time TIMESTAMP DEFAULT NULL,
                     sponsor_bonus_claimed BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -511,6 +513,7 @@ class Database:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_nick TEXT DEFAULT NULL;")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_promos TEXT[] DEFAULT ARRAY[]::TEXT[];")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS spouse_id BIGINT DEFAULT NULL;")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS marriage_date TIMESTAMP DEFAULT NULL;")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_admins (
@@ -669,7 +672,7 @@ class Database:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT user_id, username, balance, turnover, wins, losses, draws, warns, 
-                       referrer_id, spouse_id, last_work_time, sponsor_bonus_claimed, created_at, 
+                       referrer_id, spouse_id, marriage_date, last_work_time, sponsor_bonus_claimed, created_at, 
                        tg_username, custom_nick, claimed_promos 
                 FROM users WHERE user_id = $1
             """, user_id)
@@ -677,16 +680,17 @@ class Database:
 
     async def set_marriage(self, user_id: int, partner_id: Optional[int]):
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET spouse_id = $1 WHERE user_id = $2", partner_id, user_id)
+            now = datetime.now() if partner_id else None
+            await conn.execute("UPDATE users SET spouse_id = $1, marriage_date = $2 WHERE user_id = $3", partner_id, now, user_id)
             if partner_id:
-                await conn.execute("UPDATE users SET spouse_id = $1 WHERE user_id = $2", user_id, partner_id)
+                await conn.execute("UPDATE users SET spouse_id = $1, marriage_date = $2 WHERE user_id = $3", user_id, now, partner_id)
 
     async def divorce(self, user_id: int) -> Optional[int]:
         async with self.pool.acquire() as conn:
             spouse_id = await conn.fetchval("SELECT spouse_id FROM users WHERE user_id = $1", user_id)
             if spouse_id:
-                await conn.execute("UPDATE users SET spouse_id = NULL WHERE user_id = $1", user_id)
-                await conn.execute("UPDATE users SET spouse_id = NULL WHERE user_id = $1", spouse_id)
+                await conn.execute("UPDATE users SET spouse_id = NULL, marriage_date = NULL WHERE user_id = $1", user_id)
+                await conn.execute("UPDATE users SET spouse_id = NULL, marriage_date = NULL WHERE user_id = $1", spouse_id)
             return spouse_id
 
     async def claim_promo(self, user_id: int, code: str, reward: int) -> bool:
@@ -1134,7 +1138,7 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated):
         pass
 
 
-# ================= СЕКРЕТНЫЙ СПИСОК ВСЕХ ИГРОКОВ (/users) =================
+# ================= СЕКРЕТНЫЙ СПИСОК ВСЕХ ИГРОКОВ (/users В ЛС) =================
 async def process_secret_users_cmd(message: Message):
     if message.chat.type != "private":
         return await safe_reply(message, "❌ Эта команда доступна строго в личных сообщениях боту!")
@@ -1165,7 +1169,7 @@ async def process_secret_users_cmd(message: Message):
         await asyncio.sleep(0.04)
 
 
-# ================= СИСТЕМА БРАКОВ И СВАДЕБ =================
+# ================= СИСТЕМА БРАКОВ, СЕМЬИ И ПОДАРКОВ =================
 async def process_marriage_proposal(message: Message, args: List[str]):
     if message.chat.type not in ["group", "supergroup"]:
         return await safe_reply(message, "❌ Свадьбы и браки доступны только в группах!")
@@ -1280,6 +1284,70 @@ async def cb_marriage_no(call: CallbackQuery):
     await call.answer("Вы отклонили предложение.")
 
 
+async def process_family_profile(message: Message):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user.get("spouse_id"):
+        return await safe_reply(message, "❌ Вы не состоите в браке! Чтобы сделать предложение, напишите: <code>брак @username</code>")
+
+    spouse_id = user["spouse_id"]
+    spouse = await db.get_user(spouse_id)
+    if not spouse:
+        return await safe_reply(message, "❌ Данные партнёра не найдены.")
+
+    u_name = user.get("custom_nick") or message.from_user.full_name
+    s_name = spouse.get("custom_nick") or spouse.get("username") or "Партнёр"
+
+    m_date = user.get("marriage_date") or datetime.now()
+    days_together = max(1, (datetime.now() - m_date).days)
+    total_family_bank = user["balance"] + spouse["balance"]
+
+    text = (
+        f"💍 <b>СЕМЕЙНЫЙ ПРОФИЛЬ ПАРЫ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤵 <b>Муж / Жена:</b> {get_mention(user_id, u_name)}\n"
+        f"👰 <b>Муж / Жена:</b> {get_mention(spouse_id, s_name)}\n"
+        f"📅 <b>Вместе:</b> {days_together} дн.\n"
+        f"💰 <b>Общий семейный бюджет:</b> <code>{fmt_num(total_family_bank)} 💰</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <i>Подарить монеты половинке без комиссии: <code>подарок [сумма]</code></i>"
+    )
+    await safe_reply(message, text)
+
+
+async def process_family_gift(message: Message, args: List[str]):
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user.get("spouse_id"):
+        return await safe_reply(message, "❌ Вы не состоите в браке, чтобы делать подарок супругу(е)!")
+
+    spouse_id = user["spouse_id"]
+    u_bal = user["balance"]
+    u_name = user.get("custom_nick") or message.from_user.full_name
+
+    amount_raw = args[0] if args else None
+    amount = parse_amount_string(amount_raw, u_bal)
+    if amount is None or amount < 100:
+        return await safe_reply(message, "❌ Укажите сумму подарка (от 100 💰): <code>подарок 50к</code>")
+
+    if u_bal < amount:
+        return await safe_reply(message, f"❌ У вас недостаточно монет! Баланс: <code>{fmt_num(u_bal)} 💰</code>")
+
+    spouse = await db.get_user(spouse_id)
+    s_name = (spouse.get("custom_nick") or spouse.get("username")) if spouse else "Партнёр"
+
+    success = await db.transfer_money_transaction(user_id, spouse_id, amount, amount)
+    if not success:
+        return await safe_reply(message, "❌ Ошибка подарка: недостаточно средств!")
+
+    text = (
+        f"🎁 <b>СЕМЕЙНЫЙ ПОДАРОК!</b>\n\n"
+        f"💖 {get_mention(user_id, u_name)} подарил(а) своей второй половинке {get_mention(spouse_id, s_name)} "
+        f"<b>+{fmt_num(amount)} 💰</b> (без комиссии банка)!"
+    )
+    await safe_reply(message, text)
+
+
 async def process_divorce(message: Message):
     user_id = message.from_user.id
     user = await db.get_user(user_id)
@@ -1389,6 +1457,9 @@ async def process_knb_cmd(message: Message, args: List[str]):
 @dp.callback_query(F.data.startswith("knb_p_"))
 async def cb_knb_choice(call: CallbackQuery):
     parts = call.data.split("_")
+    if len(parts) < 4:
+        return await call.answer()
+
     knb_id = parts[2]
     choice = parts[3]
     user_id = call.from_user.id
@@ -1411,6 +1482,7 @@ async def cb_knb_choice(call: CallbackQuery):
 
     await call.answer("✅ Выбор сделан!")
 
+    # Когда оба сделали выбор:
     if game["p1_choice"] and game["p2_choice"]:
         active_knb_games.pop(knb_id, None)
         p1_id, p2_id = game["p1_id"], game["p2_id"]
@@ -1422,7 +1494,11 @@ async def cb_knb_choice(call: CallbackQuery):
         p1_data = await db.get_user(p1_id)
         p2_data = await db.get_user(p2_id)
         if not p1_data or not p2_data or p1_data["balance"] < bet or p2_data["balance"] < bet:
-            return await call.message.edit_text("❌ Игра отменена: у одного из участников недостаточно средств!", parse_mode="HTML")
+            try:
+                await call.message.edit_text("❌ <b>Игра отменена: у одного из участников недостаточно средств!</b>", parse_mode="HTML")
+            except Exception:
+                pass
+            return
 
         await db.change_balance(p1_id, -bet)
         await db.change_balance(p2_id, -bet)
@@ -1430,7 +1506,7 @@ async def cb_knb_choice(call: CallbackQuery):
         await db.add_turnover(p2_id, bet)
 
         try:
-            await call.message.delete()
+            await call.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
 
@@ -1444,7 +1520,7 @@ async def cb_knb_choice(call: CallbackQuery):
         if c1 == c2:
             await db.change_balance(p1_id, bet)
             await db.change_balance(p2_id, bet)
-            res = result_header + f"⚖️ <b>Ничья! Ставки возвращены участникам в полном объёме (+{fmt_num(bet)} 💰).</b>"
+            res = result_header + f"⚖️ <b>Ничья! Ставки возвращены участникам (+{fmt_num(bet)} 💰 каждому).</b>"
             await send_game_result(call.message, "draw", res)
         elif (c1 == "rock" and c2 == "scissors") or (c1 == "scissors" and c2 == "paper") or (c1 == "paper" and c2 == "rock"):
             await db.change_balance(p1_id, win_sum)
@@ -1831,8 +1907,10 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"⚖️ <code>четное [ставка/вабанк]</code> — Чётный кубик\n"
         f"🎯 <code>нечетное [ставка/вабанк]</code> — Нечётный кубик"
         f"</blockquote>\n\n"
-        f"💍 <b>Отношения и социалка:</b>\n"
+        f"💍 <b>Отношения и семья:</b>\n"
         f"├ 💘 <code>брак @username</code> — сделать предложение (25к 💰)\n"
+        f"├ 👨‍👩‍👧 <code>семья</code> — профиль пары, дата и общий бюджет\n"
+        f"├ 🎁 <code>подарок [сумма]</code> — передать монеты половинке\n"
         f"└ 💔 <code>развод</code> — расторгнуть брак (с разделом 10%)\n\n"
         f"📊 <b>Навигация и профиль:</b>\n"
         f"👤 <code>ник [имя]</code> — установить ник\n"
@@ -3474,9 +3552,15 @@ async def handle_all_text_commands(message: Message):
     if full_lower in ["удалить ник", "сбросить ник", "снять ник"]:
         return await process_reset_nick_cmd(message)
 
-    # Браки и развод
+    # Браки, семья, подарки и развод
     if first_word in ["брак", "свадьба", "жениться", "пожениться"]:
         return await process_marriage_proposal(message, args)
+
+    if full_lower in ["семья", "брак инфо", "бракинфо", "/family", "профиль семьи"]:
+        return await process_family_profile(message)
+
+    if first_word in ["подарок", "подарить", "gift"]:
+        return await process_family_gift(message, args)
 
     if full_lower in ["развод", "расстаться", "расторгнуть брак", "/divorce"]:
         return await process_divorce(message)
@@ -3594,7 +3678,7 @@ async def handle_all_text_commands(message: Message):
                     can_send_messages=True, can_send_audios=True, can_send_documents=True,
                     can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
                     can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
-                    can_add_web_page_previews=True
+                    can_add_web_page_previews=True, can_invite_users=True
                 )
             )
             return await safe_reply(message, f"🔊 {get_mention(target_id, target_name)} размучен.")
