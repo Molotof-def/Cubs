@@ -4319,7 +4319,74 @@ def main():
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
+    print(1)
 
+    async def quiz_background_worker():
+        """Фоновый воркер викторины в группах."""
+        await asyncio.sleep(300)
+        while True:
+            try:
+                await asyncio.sleep(random.randint(18000, 25200))
+                if not known_groups:
+                    continue
+
+                target_chat_id = random.choice(list(known_groups))
+                try:
+                    member_count = await bot.get_chat_member_count(target_chat_id)
+                    if member_count < 10:
+                        continue
+                except Exception:
+                    known_groups.discard(target_chat_id)
+                    continue
+
+                reward = random.randint(30000, 75000)
+                quiz_item = random.choice(QUIZ_DATABASE)
+                active_quizzes[target_chat_id] = {
+                    "answer": quiz_item["a"].lower().strip(),
+                    "reward": reward
+                }
+
+                text = (
+                    f"⚡️ <b>ИНТЕЛЛЕКТУАЛЬНАЯ ВИКТОРИНА!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"❓ <b>Вопрос:</b> {quiz_item['q']}\n\n"
+                    f"💰 Награда первому ответившему: <b>+{fmt_num(reward)} 💰</b> на баланс!\n"
+                    f"💡 <i>Просто напишите правильный ответ прямо в чат!</i>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━"
+                )
+
+                try:
+                    await bot.send_message(chat_id=target_chat_id, text=text, parse_mode="HTML")
+                except Exception:
+                    active_quizzes.pop(target_chat_id, None)
+
+            except Exception as e:
+                logger.error(f"Ошибка quiz worker: {e}")
+                await asyncio.sleep(60)
+
+    async def db_cleanup_background_worker():
+        """Фоновая очистка устаревших дуэлей и замков."""
+        await asyncio.sleep(120)
+        while True:
+            try:
+                await db.cleanup_expired_duels()
+
+                now_ts = time.time()
+                expired_conf = [k for k, v in pending_confirmations.items() if now_ts - v.get("created_at", 0) > 180]
+                for k in expired_conf:
+                    pending_confirmations.pop(k, None)
+
+                expired_mrg = [k for k, v in pending_marriages.items() if now_ts - v.get("created_at", 0) > 300]
+                for k in expired_mrg:
+                    pending_marriages.pop(k, None)
+
+                expired_locks = [uid for uid, lock_time in active_game_locks.items() if now_ts - lock_time > 30.0]
+                for uid in expired_locks:
+                    active_game_locks.pop(uid, None)
+
+            except Exception as e:
+                logger.error(f"Ошибка фонового клинера: {e}")
+            await asyncio.sleep(60)
         async def on_startup_wrapper(application):
             await on_startup(bot)
 
