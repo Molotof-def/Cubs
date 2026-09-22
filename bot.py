@@ -4264,55 +4264,8 @@ async def handle_ping(request):
     return web.Response(text="Duel Cubes Bot Engine is running smoothly! 🎲", status=200)
 
 
-async def on_startup(bot: Bot):
-    await db.init()
-
-    commands = [
-        BotCommand(command="start", description="Главное меню 🎲"),
-        BotCommand(command="work", description="Работа (до 24ч) 💼"),
-        BotCommand(command="sponsor", description="Бонус спонсора (+50k) 📢"),
-        BotCommand(command="rules", description="Правила чата 📜"),
-        BotCommand(command="check", description="Чек-раздача в чате 🎁"),
-        BotCommand(command="death", description="Рулетка Смерти (мут 10м) 💀"),
-        BotCommand(command="slots", description="Казино-слоты (до х35!) 🎰"),
-        BotCommand(command="knb", description="Камень, ножницы, бумага 🗿✂️📄"),
-        BotCommand(command="dice", description="1 кубик против бота 🤖"),
-        BotCommand(command="ladder", description="Лесенка кубиков до x7.5 🚀"),
-        BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
-        BotCommand(command="family", description="Семейный профиль 💍"),
-        BotCommand(command="chatstats", description="Статистика чата 📊"),
-        BotCommand(command="over", description="Больше (4-6) 📈"),
-        BotCommand(command="under", description="Меньше (1-3) 📉"),
-        BotCommand(command="even", description="Чётное число ⚖️"),
-        BotCommand(command="odd", description="Нечётное число 🎲"),
-        BotCommand(command="profile", description="Мой профиль и баланс 👤"),
-        BotCommand(command="ref", description="Партнерка (+3%) 🤝"),
-        BotCommand(command="pay", description="Передать монеты 💸"),
-        BotCommand(command="top", description="Топ игроков 🏆"),
-        BotCommand(command="topmsg", description="Топ по сообщениям 💬"),
-    ]
-    try:
-        await bot.set_my_commands(commands)
-    except Exception as e:
-        logger.warning(f"Ошибка регистрации команд: {e}")
-
-    asyncio.create_task(quiz_background_worker())
-    asyncio.create_task(db_cleanup_background_worker())
-
-    if RENDER_EXTERNAL_URL:
-        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
-        logger.info(f"Установка Webhook: {webhook_url}")
-        await bot.set_webhook(
-            webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
-        )
-    else:
-        logger.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме Polling.")
-
-
-def main():
-    async def quiz_background_worker():
+# ================= ФОНОВЫЕ ВОРКЕРЫ =================
+async def quiz_background_worker():
     """Фоновый воркер викторины в группах."""
     await asyncio.sleep(300)
     while True:
@@ -4379,6 +4332,61 @@ async def db_cleanup_background_worker():
         except Exception as e:
             logger.error(f"Ошибка фонового клинера: {e}")
         await asyncio.sleep(60)
+
+
+# ================= ЗАПУСК И ИНИЦИАЛИЗАЦИЯ =================
+async def handle_ping(request):
+    return web.Response(text="Duel Cubes Bot Engine is running smoothly! 🎲", status=200)
+
+
+async def on_startup(bot: Bot):
+    await db.init()
+
+    commands = [
+        BotCommand(command="start", description="Главное меню 🎲"),
+        BotCommand(command="work", description="Работа (до 24ч) 💼"),
+        BotCommand(command="sponsor", description="Бонус спонсора (+50k) 📢"),
+        BotCommand(command="rules", description="Правила чата 📜"),
+        BotCommand(command="check", description="Чек-раздача в чате 🎁"),
+        BotCommand(command="death", description="Рулетка Смерти (мут 10м) 💀"),
+        BotCommand(command="slots", description="Казино-слоты (до х35!) 🎰"),
+        BotCommand(command="knb", description="Камень, ножницы, бумага 🗿✂️📄"),
+        BotCommand(command="dice", description="1 кубик против бота 🤖"),
+        BotCommand(command="ladder", description="Лесенка кубиков до x7.5 🚀"),
+        BotCommand(command="duel", description="Дуэль 1v1 в чате ⚔️"),
+        BotCommand(command="family", description="Семейный профиль 💍"),
+        BotCommand(command="chatstats", description="Статистика чата 📊"),
+        BotCommand(command="over", description="Больше (4-6) 📈"),
+        BotCommand(command="under", description="Меньше (1-3) 📉"),
+        BotCommand(command="even", description="Чётное число ⚖️"),
+        BotCommand(command="odd", description="Нечётное число 🎲"),
+        BotCommand(command="profile", description="Мой профиль и баланс 👤"),
+        BotCommand(command="ref", description="Партнерка (+3%) 🤝"),
+        BotCommand(command="pay", description="Передать монеты 💸"),
+        BotCommand(command="top", description="Топ игроков 🏆"),
+        BotCommand(command="topmsg", description="Топ по сообщениям 💬"),
+    ]
+    try:
+        await bot.set_my_commands(commands)
+    except Exception as e:
+        logger.warning(f"Ошибка регистрации команд: {e}")
+
+    asyncio.create_task(quiz_background_worker())
+    asyncio.create_task(db_cleanup_background_worker())
+
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+        logger.info(f"Установка Webhook: {webhook_url}")
+        await bot.set_webhook(
+            webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
+        )
+    else:
+        logger.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме Polling.")
+
+
+def main():
     if RENDER_EXTERNAL_URL:
         app = web.Application()
         app.router.add_get("/", handle_ping)
@@ -4386,6 +4394,12 @@ async def db_cleanup_background_worker():
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
+
+        async def on_startup_wrapper(application):
+            await on_startup(bot)
+
+        app.on_startup.append(on_startup_wrapper)
+        web.run_app(app, host="0.0.0.0", port=PORT)
     else:
         async def run_polling():
             await db.init()
