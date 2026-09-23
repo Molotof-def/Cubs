@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-DUEL CUBES BOT ENGINE - PRODUCTION MONOLITH
-PART 1: CONFIG, TEXT DATABASES, SCHEMAS & ATOMIC DATABASE LOGIC
+DUEL CUBES BOT - PRODUCTION MONOLITH
+PART 1: CONFIG, LIBRARIES, DATABASES, SCHEMAS & ATOMIC DATABASE METHODS
 """
 
 import os
@@ -19,7 +19,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple, Any, Set, Union
 
 import asyncpg
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.exceptions import (
     TelegramRetryAfter,
@@ -28,7 +27,6 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramForbiddenError
 )
-from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, ADMINISTRATOR
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -44,16 +42,15 @@ from aiogram.types import (
     BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # ================= КОНФИГУРАЦИЯ СЕРВЕРА =================
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
-    sys.exit("❌ ОШИБКА: Переменная BOT_TOKEN не найдена в Environment на Render!")
+    sys.exit("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения на Render!")
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:
-    sys.exit("❌ ОШИБКА: Переменная DATABASE_URL не найдена в Environment на Render!")
+    sys.exit("❌ ОШИБКА: DATABASE_URL не найден в переменных окружения на Render!")
 
 DEV_ID: int = 5103088337             # Главный разработчик
 CREATOR_IDS: Set[int] = {2053035323} # Создатель проекта
@@ -71,10 +68,6 @@ if "t.me/" in SPONSOR_CHANNEL_RAW:
 if SPONSOR_CHANNEL_RAW and not SPONSOR_CHANNEL_RAW.startswith("@") and not SPONSOR_CHANNEL_RAW.startswith("-100"):
     SPONSOR_CHANNEL_RAW = f"@{SPONSOR_CHANNEL_RAW}"
 SPONSOR_CHANNEL: str = SPONSOR_CHANNEL_RAW
-
-RENDER_EXTERNAL_URL: Optional[str] = os.getenv("RENDER_EXTERNAL_URL")
-PORT: int = int(os.getenv("PORT", 8080))
-WEBHOOK_PATH: str = "/webhook"
 
 IMG_WIN: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/win.jpg"
 IMG_LOSS: str = "https://raw.githubusercontent.com/Molotof-def/Cubs/main/lose.jpg"
@@ -114,78 +107,28 @@ WORK_TASKS: List[str] = [
     "собрал мощный кастомный игровой компьютер под спецзаказ клиента",
     "провел аудит сетевой безопасности и закрыл критические уязвимости",
     "заключил выгодный контракт на поставку цифрового оборудования",
-    "разработал вирусный скрипт для автоматизации торговли активами",
-    "успешно инвестировал в перспективный стартап и зафиксировал дивиденды",
-    "перепродал партию редких спортивных гиперкаров на закрытом аукционе",
-    "отреставрировал раритетный мотоцикл и выставил в элитном шоуруме"
+    "разработал скрипт для автоматизации анализа блокчейн-транзакций",
+    "успешно инвестировал в перспективный стартап и зафиксировал дивиденды"
 ]
 
 LADDER_STEPS: Dict[int, float] = {
     0: 1.0, 1: 1.3, 2: 1.8, 3: 2.5, 4: 4.0, 5: 7.5
 }
+
+# Тяжёлая экономика: высокая стоимость, умеренный доход раз в 12 часов
 BUSINESS_CATALOG: Dict[str, Dict[str, Any]] = {
-    "vending": {
-        "name": "Сеть вендинговых аппаратов",
-        "cost": 1_500_000,
-        "income_12h": 18_000,
-        "icon": "☕"
-    },
-    "kiosk": {
-        "name": "Круглосуточный павильон",
-        "cost": 5_000_000,
-        "income_12h": 55_000,
-        "icon": "🏪"
-    },
-    "pc_club": {
-        "name": "Киберспортивная арена",
-        "cost": 18_000_000,
-        "income_12h": 160_000,
-        "icon": "🖥"
-    },
-    "car_wash": {
-        "name": "Роботизированная автомойка",
-        "cost": 50_000_000,
-        "income_12h": 400_000,
-        "icon": "🚿"
-    },
-    "logistics": {
-        "name": "Логистический терминал",
-        "cost": 140_000_000,
-        "income_12h": 950_000,
-        "icon": "🚛"
-    },
-    "crypto_farm": {
-        "name": "ASIC Дата-центр",
-        "cost": 350_000_000,
-        "income_12h": 2_200_000,
-        "icon": "⛏"
-    },
-    "factory": {
-        "name": "Нефтеперерабатывающий завод",
-        "cost": 900_000_000,
-        "income_12h": 5_000_000,
-        "icon": "🏭"
-    },
-    "casino": {
-        "name": "Неоновое казино в Вегасе",
-        "cost": 2_500_000_000,
-        "income_12h": 12_500_000,
-        "icon": "🎰"
-    },
-    "bank": {
-        "name": "Транснациональный банк",
-        "cost": 7_000_000_000,
-        "income_12h": 32_000_000,
-        "icon": "🏦"
-    },
-    "spaceport": {
-        "name": "Частный орбитальный космодром",
-        "cost": 20_000_000_000,
-        "income_12h": 85_000_000,
-        "icon": "🚀"
-    }
+    "vending": {"name": "Сеть вендинговых аппаратов", "cost": 1500000, "income_12h": 18000, "icon": "☕"},
+    "kiosk": {"name": "Круглосуточный павильон", "cost": 5000000, "income_12h": 55000, "icon": "🏪"},
+    "pc_club": {"name": "Киберспортивная арена", "cost": 18000000, "income_12h": 160000, "icon": "🖥"},
+    "car_wash": {"name": "Роботизированная автомойка", "cost": 50000000, "income_12h": 400000, "icon": "🚿"},
+    "logistics": {"name": "Логистический терминал", "cost": 140000000, "income_12h": 950000, "icon": "🚛"},
+    "crypto_farm": {"name": "ASIC Дата-центр", "cost": 350000000, "income_12h": 2200000, "icon": "⛏"},
+    "factory": {"name": "Нефтеперерабатывающий завод", "cost": 900000000, "income_12h": 5000000, "icon": "🏭"},
+    "casino": {"name": "Неоновое казино в Вегасе", "cost": 2500000000, "income_12h": 12500000, "icon": "🎰"},
+    "bank": {"name": "Транснациональный банк", "cost": 7000000000, "income_12h": 3200000, "icon": "🏦"},
+    "spaceport": {"name": "Орбитальный космодром", "cost": 20000000000, "income_12h": 85000000, "icon": "🚀"}
 }
-# Мягкие, ламповые RP-действия (все 46+ наименований приведены к дружелюбному стилю)
+
 RP_ACTIONS: Dict[str, Tuple[str, str]] = {
     "ударить": ("игриво шлёпнул(а) мягкой подушкой", "🛋"),
     "въебать": ("навесил(а) мощный дружеский щелбан", "💥"),
@@ -240,134 +183,33 @@ RP_ACTIONS: Dict[str, Tuple[str, str]] = {
     "утешить": ("с любовью обнял(а) и успокоил(а)", "🥺")
 }
 
-# База данных из 100+ вопросов для викторины
+# Сложная база викторины с массивами альтернативных ответов
 QUIZ_DATABASE: List[Dict[str, Any]] = [
-    {
-        "q": "В каком году произошёл взрыв сверхновой SN 1987A в Большом Магеллановом Облаке?",
-        "answers": ["1987", "1987 год", "в 1987"]
-    },
-    {
-        "q": "Как называется горизонт событий вращающейся чёрной дыры по решению Керра (внешняя граница)?",
-        "answers": ["эргосфера", "эргосферы"]
-    },
-    {
-        "q": "Единственный элемент периодической таблицы Менделеева, названный в честь живущего ныне учёного?",
-        "answers": ["оганесон", "og", "оганесий", "оганесян"]
-    },
-    {
-        "q": "Фамилия учёного, сформулировавшего теорему о неполноте формальной арифметики?",
-        "answers": ["гёдель", "гедель", "курт гёдель", "курт гедель"]
-    },
-    {
-        "q": "Какая математическая постоянная приблизительно равна 2.71828?",
-        "answers": ["e", "е", "число эйлера", "эйлер"]
-    },
-    {
-        "q": "Какой древний город-государство был уничтожен римлянами в 146 году до н.э. в конце Третьей Пунической войны?",
-        "answers": ["карфаген"]
-    },
-    {
-        "q": "В какой битве 1805 года Наполеон разгромил объединённые армии России и Австрии?",
-        "answers": ["аустерлиц", "битва при аустерлице", "под аустерлицем"]
-    },
-    {
-        "q": "Как звали последнего императора Западной Римской империи, низложенного Одоакром?",
-        "answers": ["ромул августул", "ромул август", "августул"]
-    },
-    {
-        "q": "Как называется минимальная неделимая единица информации в квантовых вычислениях?",
-        "answers": ["кубит", "qubit", "кубиты"]
-    },
-    {
-        "q": "Какая временная сложность (Big O) в худшем случае у алгоритма быстрой сортировки (QuickSort)?",
-        "answers": ["o(n^2)", "o(n2)", "n^2", "квадратичная", "o(n*n)"]
-    },
-    {
-        "q": "Фамилия создателя языка программирования C++?",
-        "answers": ["страуструп", "бьёрн страуструп", "бьерн страуструп"]
-    },
-    {
-        "q": "Какое давление (в атмосферах или барах с точностью до десятка) у поверхности Венеры?",
-        "answers": ["90", "92", "93", "95", "около 90", "90 атм"]
-    },
-    {
-        "q": "Какой византийский император построил собор Святой Софии в Константинополе?",
-        "answers": ["юстиниан", "юстиниан 1", "юстиниан i", "юстиниан великий"]
-    },
-    {
-        "q": "Какой химический элемент имеет наивысшую температуру плавления среди всех металлов?",
-        "answers": ["вольфрам", "w"]
-    },
-    {
-        "q": "Какая фундаментальная частица переносит электромагнитное взаимодействие?",
-        "answers": ["фотон"]
-    },
-    {
-        "q": "Столица древнего государства Урарту на берегу озера Ван?",
-        "answers": ["тушпа"]
-    },
-    {
-        "q": "Как называется точка на орбите небесного тела, наиболее удалённая от Солнца?",
-        "answers": ["афелий", "апогелий"]
-    },
-    {
-        "q": "В каком году был подписан Вестфальский мир, положивший конец Тридцатилетней войне?",
-        "answers": ["1648", "1648 год", "в 1648"]
-    },
-    {
-        "q": "Как называется протокол прикладного уровня, работающий поверх TLS и UDP (на базе протокола QUIC)?",
-        "answers": ["http/3", "http3", "quic"]
-    },
-    {
-        "q": "Какой философ античности написал диалог 'Государство' и описал 'миф о пещере'?",
-        "answers": ["платон"]
-    },
-    {
-        "q": "Как называется болезнь, вызванная дефицитом тиамина (витамина B1)?",
-        "answers": ["бери-бери", "берибери"]
-    },
-    {
-        "q": "Фамилия первооткрывателя реликтового микроволнового излучения вместе с Арно Пензиасом?",
-        "answers": ["вилсон", "уилсон", "роберт вилсон", "роберт уилсон"]
-    },
-    {
-        "q": "Какой минерал имеет твёрдость 9 по шкале Мооса, уступая только алмазу?",
-        "answers": ["корунд"]
-    },
-    {
-        "q": "Как называется гипотетический предел массы для белого карлика, выше которого он коллапсирует в нейтронную звезду?",
-        "answers": ["предел чандрасекара", "чандрасекар", "чандрасекара"]
-    },
-    {
-        "q": "В каком сражении 1242 года князь Александр Невский разгромил ливонских рыцарей?",
-        "answers": ["ледовое побоище", "битва на чудском озере", "чудское озеро"]
-    },
-    {
-        "q": "Фамилия микробиолога, открывшего пенициллин в 1928 году?",
-        "answers": ["флеминг", "александр флеминг"]
-    },
-    {
-        "q": "Как в генетике называется совокупность всех генов организма?",
-        "answers": ["генотип", "геном"]
-    },
-    {
-        "q": "Какой закон физики связывает напряжённость электрического поля с плотностью заряда (первое уравнение Максвелла)?",
-        "answers": ["закон гаусса", "теорема гаусса", "гаусс"]
-    },
-    {
-        "q": "Столица древней Ассирийской державы, разрушенная в 612 г. до н.э.?",
-        "answers": ["ниневия"]
-    },
-    {
-        "q": "Какая планета в Солнечной системе вращается вокруг своей оси 'лёжа на боку' (наклон оси более 97 градусов)?",
-        "answers": ["уран"]
-    }
+    {"q": "В каком году произошёл взрыв сверхновой SN 1987A в Большом Магеллановом Облаке?", "answers": ["1987", "1987 год", "в 1987"]},
+    {"q": "Как называется внешняя граница вращающейся чёрной дыры по решению Керра?", "answers": ["эргосфера", "эргосферы"]},
+    {"q": "Единственный элемент периодической таблицы, названный в честь живущего ныне учёного?", "answers": ["оганесон", "og", "оганесий"]},
+    {"q": "Фамилия учёного, сформулировавшего теорему о неполноте формальной арифметики?", "answers": ["гёдель", "гедель", "курт гёдель", "курт гедель"]},
+    {"q": "Какая математическая постоянная приблизительно равна 2.71828?", "answers": ["e", "е", "число эйлера", "эйлер"]},
+    {"q": "Какой древний город был разрушен римлянами в 146 году до н.э. в конце Третьей Пунической войны?", "answers": ["карфаген"]},
+    {"q": "В какой битве 1805 года Наполеон разгромил объединённые армии России и Австрии?", "answers": ["аустерлиц", "битва при аустерлице", "под аустерлицем"]},
+    {"q": "Фамилия создателя языка программирования C++?", "answers": ["страуструп", "бьёрн страуструп", "бьерн страуструп"]},
+    {"q": "Какая фундаментальная частица переносит электромагнитное взаимодействие?", "answers": ["фотон"]},
+    {"q": "Какой минерал имеет твёрдость 9 по шкале Мооса, уступая только алмазу?", "answers": ["корунд"]},
+    {"q": "Как называется болезнь, вызванная острым дефицитом витамина B1 (тиамина)?", "answers": ["бери-бери", "берибери"]},
+    {"q": "В каком сражении 1242 года князь Александр Невский разгромил ливонских рыцарей?", "answers": ["ледовое побоище", "битва на чудском озере", "чудское озеро"]},
+    {"q": "Фамилия микробиолога, открывшего пенициллин в 1928 году?", "answers": ["флеминг", "александр флеминг"]},
+    {"q": "Какая планета Солнечной системы вращается вокруг своей оси 'лёжа на боку'?", "answers": ["уран"]},
+    {"q": "Сколько бит содержится в одном байте?", "answers": ["8", "восемь"]},
+    {"q": "Создатель Telegram (фамилия)?", "answers": ["дуров", "павел дуров"]},
+    {"q": "Какая планета в Солнечной системе самая большая по массе и объёму?", "answers": ["юпитер"]},
+    {"q": "Химический символ золота в таблице Менделеева?", "answers": ["au", "аурум"]},
+    {"q": "Самое глубокое пресноводное озеро на Земле?", "answers": ["байкал"]}
 ]
 
 bot: Bot = Bot(token=BOT_TOKEN)
 dp: Dispatcher = Dispatcher()
 
-# Глобальные кэши состояний
+# Глобальные кэши
 active_ladders: Dict[int, dict] = {}
 active_checks: Dict[str, dict] = {}
 active_quizzes: Dict[int, dict] = {}
@@ -477,7 +319,7 @@ def render_ladder(current_step: int) -> str:
             lines.append(f"▫️ [ Ступень {step} ] ➔ x{mult}")
     return "\n".join(lines)
 
-# ================= МОДУЛЬ БАЗЫ ДАННЫХ (POSTGRESQL С ПУЛОМ) =================
+# ================= БАЗА ДАННЫХ POSTGRESQL =================
 class Database:
     def __init__(self, db_url: str):
         self.db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -1148,7 +990,6 @@ def start_private_keyboard(bot_username: str):
     builder.adjust(1)
     return builder.as_markup()
 
-
 def admin_dashboard_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить показатели", callback_data="adm_refresh_stats")
@@ -1157,12 +998,10 @@ def admin_dashboard_keyboard():
     builder.adjust(2, 1)
     return builder.as_markup()
 
-
 def replay_keyboard(game_type: str, bet: int, user_id: int):
     builder = InlineKeyboardBuilder()
     builder.button(text=f"🔄 Повторить ({fmt_num(bet)} 💰)", callback_data=f"rep_{game_type}_{bet}_{user_id}")
     return builder.as_markup()
-
 
 def confirm_bet_keyboard(conf_id: str):
     builder = InlineKeyboardBuilder()
@@ -1171,14 +1010,12 @@ def confirm_bet_keyboard(conf_id: str):
     builder.adjust(2)
     return builder.as_markup()
 
-
 def marriage_keyboard(marriage_id: str):
     builder = InlineKeyboardBuilder()
     builder.button(text="💍 Да, согласен(на)!", callback_data=f"mrg_yes_{marriage_id}")
     builder.button(text="💔 Отказать", callback_data=f"mrg_no_{marriage_id}")
     builder.adjust(2)
     return builder.as_markup()
-
 
 def knb_keyboard(knb_id: str):
     builder = InlineKeyboardBuilder()
@@ -1188,7 +1025,6 @@ def knb_keyboard(knb_id: str):
     builder.adjust(3)
     return builder.as_markup()
 
-
 def report_admin_keyboard(target_id: int):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔇 Мут 30м", callback_data=f"adm_mute_{target_id}_1800")
@@ -1196,7 +1032,6 @@ def report_admin_keyboard(target_id: int):
     builder.button(text="🛑 Бан", callback_data=f"adm_ban_{target_id}")
     builder.adjust(3)
     return builder.as_markup()
-
 
 def top_menu_keyboard(current_tab: str = "balance"):
     builder = InlineKeyboardBuilder()
@@ -1210,12 +1045,10 @@ def top_menu_keyboard(current_tab: str = "balance"):
     builder.adjust(3)
     return builder.as_markup()
 
-
 def top_messages_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
     builder.button(text="💬 Обновить топ сообщений", callback_data=f"tmsg_{chat_id}_all")
     return builder.as_markup()
-
 
 def duel_keyboard(duel_id: str):
     builder = InlineKeyboardBuilder()
@@ -1224,12 +1057,10 @@ def duel_keyboard(duel_id: str):
     builder.adjust(2)
     return builder.as_markup()
 
-
 def check_keyboard(check_id: str, remaining: int, total: int):
     builder = InlineKeyboardBuilder()
     builder.button(text=f"🎁 Забрать чек ({remaining}/{total})", callback_data=f"take_chk_{check_id}")
     return builder.as_markup()
-
 
 def ladder_keyboard(user_id: int, step: int):
     builder = InlineKeyboardBuilder()
@@ -1240,7 +1071,6 @@ def ladder_keyboard(user_id: int, step: int):
     builder.adjust(1)
     return builder.as_markup()
 
-
 def sub_keyboard(target_user_id: int):
     builder = InlineKeyboardBuilder()
     clean_ch = REQUIRED_CHANNEL.replace("@", "")
@@ -1249,7 +1079,6 @@ def sub_keyboard(target_user_id: int):
     builder.button(text="🔄 Проверить подписку", callback_data=f"sub_chk_{target_user_id}")
     builder.adjust(1)
     return builder.as_markup()
-
 
 def sponsor_keyboard(target_user_id: int):
     builder = InlineKeyboardBuilder()
@@ -1260,7 +1089,6 @@ def sponsor_keyboard(target_user_id: int):
     builder.adjust(1)
     return builder.as_markup()
 
-
 def captcha_keyboard(user_id: int, options: List[int]):
     builder = InlineKeyboardBuilder()
     for opt in options:
@@ -1268,8 +1096,7 @@ def captcha_keyboard(user_id: int, options: List[int]):
     builder.adjust(2, 2)
     return builder.as_markup()
 
-
-# ================= ПРОВЕРКА ПОДПИСКИ И БЕЗОПАСНАЯ ОТПРАВКА =================
+# ================= ПРОВЕРКА ПОДПИСКИ И ОТПРАВКА =================
 async def check_channel_member(user_id: int, channel_target: str) -> bool:
     if not channel_target or channel_target.lower() in ["none", "null", "", "@none", "@null"]:
         return True
@@ -1285,10 +1112,8 @@ async def check_channel_member(user_id: int, channel_target: str) -> bool:
         logger.debug(f"Ошибка проверки подписки {channel_target} для {user_id}: {e}")
         return True
 
-
 async def check_subscription(user_id: int) -> bool:
     return await check_channel_member(user_id, REQUIRED_CHANNEL)
-
 
 @dp.callback_query(F.data.startswith("sub_chk_"))
 async def cb_recheck_sub(call: CallbackQuery):
@@ -1300,7 +1125,7 @@ async def cb_recheck_sub(call: CallbackQuery):
         if await check_subscription(call.from_user.id):
             try:
                 await call.message.edit_text(
-                    "✅ <b>Подписка успешно подтверждена!</b>\nТеперь вам открыт полный функционал клуба.",
+                    "✅ <b>Подписка подтверждена!</b>\nВам доступен полный функционал клуба.",
                     parse_mode="HTML"
                 )
             except Exception:
@@ -1309,7 +1134,6 @@ async def cb_recheck_sub(call: CallbackQuery):
             await call.answer(f"❌ Вы ещё не подписались на {REQUIRED_CHANNEL}!", show_alert=True)
     except Exception as e:
         logger.error(f"Сбой cb_recheck_sub: {e}")
-
 
 async def safe_reply(message: Message, text: str, reply_markup=None):
     try:
@@ -1322,7 +1146,6 @@ async def safe_reply(message: Message, text: str, reply_markup=None):
         except Exception as final_err:
             logger.error(f"Фатальная ошибка safe_reply: {final_err}")
             return None
-
 
 async def send_game_result(message: Message, result_type: str, caption: str, user_id: Optional[int] = None, game_type: Optional[str] = None, bet: Optional[int] = None, reply_markup=None):
     banners = {
@@ -1366,8 +1189,7 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
 
     await safe_reply(message, full_caption, reply_markup=final_markup)
 
-
-# ================= КНОПКИ ПОДТВЕРЖДЕНИЯ СТАВОК =================
+# ================= ПОДТВЕРЖДЕНИЕ КРУПНЫХ СТАВОК =================
 async def check_bet_confirmation(message: Message, user_id: int, user_name: str, bet: int, game_type: str, direct_callback) -> bool:
     user = await db.get_user(user_id)
     user_bal = user["balance"] if user else 0
@@ -1399,7 +1221,6 @@ async def check_bet_confirmation(message: Message, user_id: int, user_name: str,
 
     return True
 
-
 @dp.callback_query(F.data.startswith("conf_ok_"))
 async def cb_confirm_ok(call: CallbackQuery):
     conf_id = call.data.replace("conf_ok_", "")
@@ -1411,7 +1232,6 @@ async def cb_confirm_ok(call: CallbackQuery):
         return await call.answer("❌ Это не ваша ставка!", show_alert=True)
 
     pending_confirmations.pop(conf_id, None)
-
     try:
         await call.message.delete()
     except Exception:
@@ -1419,7 +1239,6 @@ async def cb_confirm_ok(call: CallbackQuery):
 
     handler = data["handler"]
     await handler(data["message"], data["user_id"], data["user_name"], data["bet"])
-
 
 @dp.callback_query(F.data.startswith("conf_no_"))
 async def cb_confirm_no(call: CallbackQuery):
@@ -1432,21 +1251,14 @@ async def cb_confirm_no(call: CallbackQuery):
         return await call.answer("❌ Это не ваша ставка!", show_alert=True)
 
     pending_confirmations.pop(conf_id, None)
-
     try:
         await call.message.edit_text("🚫 <b>Ставка была отменена игроком.</b>", parse_mode="HTML")
     except Exception:
         pass
     await call.answer("Отменено.")
 
-
-# ================= ИГРОВОЙ ДВИЖОК: РУЛЕТКА СМЕРТИ (МУТ 10 МИНУТ) =================
+# ================= РУЛЕТКА СМЕРТИ (МУТ 10 МИНУТ) =================
 async def run_death_roulette_game(message: Message, user_id: int, user_name: str, bet: int):
-    """
-    Рулетка Смерти: бот генерирует 2 смертельных числа из 6.
-    Если кубик падает на безопасное (4 числа) -> выигрыш x1.8.
-    Если на смертельное (2 числа) -> ставка сгорает + МУТ НА 10 МИНУТ в чате!
-    """
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
         user = await db.get_user(user_id)
@@ -1492,7 +1304,7 @@ async def run_death_roulette_game(message: Message, user_id: int, user_name: str
                 except Exception as m_err:
                     logger.warning(f"Не удалось выдать мут в рулетке смерти: {m_err}")
 
-            mute_info = "\n🔇 <b>НАКАЗАНИЕ:</b> Вам выдан <b>мут на 10 минут</b> за поражение в смертельной рулетке!" if mute_applied else "\n💡 <i>(В ЛС мут не выдается, повезло!)</i>"
+            mute_info = "\n🔇 <b>НАКАЗАНИЕ:</b> Вам выдан <b>мут на 10 минут</b> за поражение в смертельной рулетке!" if mute_applied else "\n💡 <i>(В ЛС мут не выдается)</i>"
 
             res = (
                 f"👤 {get_mention(user_id, display_name)}\n"
@@ -1521,8 +1333,7 @@ async def run_death_roulette_game(message: Message, user_id: int, user_name: str
     finally:
         active_game_locks.pop(user_id, None)
 
-
-# ================= ИГРОВЫЕ ДВИЖКИ: КУБИКИ, ДАБЛ, СЛОТЫ, СТАВКИ =================
+# ================= ИГРОВЫЕ РЕЖИМЫ: КУБИКИ, СЛОТЫ, СТАВКИ =================
 async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
@@ -1580,11 +1391,10 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         await safe_reply(
             message,
             f"⚠️ <b>Произошёл сбой сети Telegram!</b>\n"
-            f"👤 {get_mention(user_id, display_name)}, ваша ставка <b>{fmt_num(bet)} 💰</b> автоматически возвращена на баланс."
+            f"👤 {get_mention(user_id, display_name)}, ваша ставка <b>{fmt_num(bet)} 💰</b> возвращена на баланс."
         )
     finally:
         active_game_locks.pop(user_id, None)
-
 
 async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
@@ -1619,7 +1429,7 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
             await db.change_balance(user_id, win)
             await db.record_game(user_id, "win")
 
-            bonus_title = "🔥 <b>РЕДКИЙ МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
+            bonus_title = "🔥 <b>МЕГА-ДУБЛЬ (x3.0)!</b>\n" if is_double else f"Коэффициент: <b>x{mult}</b>\n"
             res = (
                 f"👤 {get_mention(user_id, display_name)}\n"
                 f"🎲 Ваши очки: {p1} + {p2} = <b>{p_sum}</b>\n"
@@ -1654,11 +1464,10 @@ async def run_doubledice_game(message: Message, user_id: int, user_name: str, be
         await safe_reply(
             message,
             f"⚠️ <b>Произошёл сбой сети Telegram!</b>\n"
-            f"👤 {get_mention(user_id, display_name)}, ваша ставка <b>{fmt_num(bet)} 💰</b> возвращена на баланс."
+            f"👤 {get_mention(user_id, display_name)}, ставка <b>{fmt_num(bet)} 💰</b> возвращена на баланс."
         )
     finally:
         active_game_locks.pop(user_id, None)
-
 
 async def run_simple_bet_game(message: Message, user_id: int, user_name: str, bet: int, game_type: str):
     success = await db.deduct_bet_atomic(user_id, bet)
@@ -1723,7 +1532,6 @@ async def run_simple_bet_game(message: Message, user_id: int, user_name: str, be
     finally:
         active_game_locks.pop(user_id, None)
 
-
 async def run_slots_game(message: Message, user_id: int, user_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
@@ -1783,8 +1591,7 @@ async def run_slots_game(message: Message, user_id: int, user_name: str, bet: in
     finally:
         active_game_locks.pop(user_id, None)
 
-
-# ================= ИГРОВОЙ ДВИЖОК: ЛЕСЕНКА =================
+# ================= ЛЕСЕНКА С АВТО-ТАЙМАУТОМ =================
 async def ladder_timeout_watcher(user_id: int, message_obj: Message):
     try:
         await asyncio.sleep(180)
@@ -1827,7 +1634,6 @@ async def ladder_timeout_watcher(user_id: int, message_obj: Message):
     except asyncio.CancelledError:
         pass
 
-
 async def run_ladder_game(message: Message, user_id: int, display_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
@@ -1857,7 +1663,6 @@ async def run_ladder_game(message: Message, user_id: int, display_name: str, bet
         f"🎲 <i>Правила: кубики 3, 4, 5, 6 — подъём наверх. Кубики 1 или 2 — падение!</i>"
     )
     await safe_reply(message, text, reply_markup=ladder_keyboard(user_id, 0))
-
 
 @dp.callback_query(F.data.startswith("ld_step_"))
 async def cb_ladder_step(call: CallbackQuery):
@@ -1947,7 +1752,6 @@ async def cb_ladder_step(call: CallbackQuery):
     )
     await call.message.answer(res, reply_markup=ladder_keyboard(user_id, step), parse_mode="HTML")
 
-
 @dp.callback_query(F.data.startswith("ld_cash_"))
 async def cb_ladder_cash(call: CallbackQuery):
     try:
@@ -1991,20 +1795,15 @@ async def cb_ladder_cash(call: CallbackQuery):
     )
     await send_game_result(call.message, "win", res, user_id=user_id)
 
-
-# ================= ИГРОВОЙ ДВИЖОК: КНБ (3 МИНУТЫ) =================
+# ================= КНБ И ДУЭЛИ 1V1 =================
 async def knb_timeout_watcher(knb_id: str, message: Message):
     await asyncio.sleep(180)
     if knb_id in active_knb_games:
         active_knb_games.pop(knb_id, None)
         try:
-            await message.edit_text(
-                "⌛ <b>Время на ход в КНБ истекло (3 мин)! Игра отменена.</b>",
-                parse_mode="HTML"
-            )
+            await message.edit_text("⌛ <b>Время на ход в КНБ истекло (3 мин)! Игра отменена.</b>", parse_mode="HTML")
         except Exception:
             pass
-
 
 async def process_knb_cmd(message: Message, args: List[str]):
     challenger = message.from_user
@@ -2083,7 +1882,6 @@ async def process_knb_cmd(message: Message, args: List[str]):
     )
     sent_msg = await safe_reply(message, text, reply_markup=knb_keyboard(knb_id))
     active_knb_games[knb_id]["task"] = asyncio.create_task(knb_timeout_watcher(knb_id, sent_msg))
-
 
 @dp.callback_query(F.data.startswith("knb_p_"))
 async def cb_knb_choice(call: CallbackQuery):
@@ -2172,8 +1970,6 @@ async def cb_knb_choice(call: CallbackQuery):
             res = result_header + f"🏆 <b>Победитель:</b> {get_mention(p2_id, game['p2_name'])}\n💵 Выигрыш: <b>+{fmt_num(win_sum)} 💰</b>"
             await send_game_result(call.message, "win", res, user_id=p2_id)
 
-
-# ================= ДУЭЛИ 1V1 В ЧАТЕ =================
 async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
     try:
         await asyncio.sleep(120)
@@ -2181,12 +1977,11 @@ async def duel_timeout_watcher(duel_id: str, duel_msg: Message):
         if duel and duel["status"] == "pending":
             await db.delete_duel(duel_id)
             try:
-                await duel_msg.edit_text("⌛ <b>Время ожидания дуэли истекло (2 мин). Игра автоматически отменена, деньги возвращены!</b>", parse_mode="HTML")
+                await duel_msg.edit_text("⌛ <b>Время ожидания дуэли истекло (2 мин). Игра отменена!</b>", parse_mode="HTML")
             except Exception:
                 pass
     except asyncio.CancelledError:
         pass
-
 
 async def process_duel_cmd(message: Message, args: List[str]):
     challenger = message.from_user
@@ -2284,7 +2079,6 @@ async def process_duel_cmd(message: Message, args: List[str]):
     duel_msg = await message.reply(text, reply_markup=duel_keyboard(duel_id), parse_mode="HTML")
     asyncio.create_task(duel_timeout_watcher(duel_id, duel_msg))
 
-
 @dp.callback_query(F.data.startswith("ac_"))
 async def cb_accept_duel(call: CallbackQuery):
     duel_id = call.data.replace("ac_", "")
@@ -2375,7 +2169,6 @@ async def cb_accept_duel(call: CallbackQuery):
 
     await db.delete_duel(duel_id)
 
-
 @dp.callback_query(F.data.startswith("dc_"))
 async def cb_decline_duel(call: CallbackQuery):
     duel_id = call.data.replace("dc_", "")
@@ -2392,7 +2185,6 @@ async def cb_decline_duel(call: CallbackQuery):
     except Exception:
         pass
     await call.answer("Дуэль отклонена.")
-
 
 @dp.callback_query(F.data.startswith("rep_"))
 async def cb_quick_replay(call: CallbackQuery):
@@ -2496,7 +2288,6 @@ async def process_clan_create(message: Message, args: List[str]):
         logger.error(f"Ошибка создания клана: {e}")
         return await safe_reply(message, "❌ Ошибка создания клана в базе данных!")
 
-
 async def process_clan_info(message: Message):
     user_id = message.from_user.id
     u_data = await db.get_user(user_id)
@@ -2531,7 +2322,6 @@ async def process_clan_info(message: Message):
     )
     await safe_reply(message, text)
 
-
 async def process_clan_deposit(message: Message, args: List[str]):
     user_id = message.from_user.id
     u_data = await db.get_user(user_id)
@@ -2557,35 +2347,7 @@ async def process_clan_deposit(message: Message, args: List[str]):
         f"💰 {get_mention(user_id, display_name)} внёс в казну клана <b>+{fmt_num(amount)} 💰</b>!"
     )
 
-
-# ================= БИЗНЕСЫ И ПАССИВНЫЙ ДОХОД =================
-async def process_businesses_catalog(message: Message):
-    user_id = message.from_user.id
-    user = await db.get_user(user_id)
-    user_bal = user["balance"] if user else 0
-
-    lines = [
-        "💼 <b>КОММЕРЧЕСКИЙ РЫНОК БИЗНЕСА</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "<i>Приобретайте предприятия и собирайте прибыль каждый час!</i>\n"
-    ]
-
-    for key, data in BUSINESS_CATALOG.items():
-        lines.append(
-            f"{data['icon']} <b>{data['name']}</b> [<code>{key}</code>]\n"
-            f"  ├ 💵 Стоимость покупки: <code>{fmt_num(data['cost'])} 💰</code>\n"
-            f"  └ 📈 Доход в час: <b>+{fmt_num(data['income'])} 💰/час</b>"
-        )
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💰 Ваш баланс: <b>{fmt_num(user_bal)} 💰</b>")
-    lines.append("💡 <i>Купить бизнес:</i> <code>купить бизнес [код]</code>")
-    lines.append("📥 <i>Собрать прибыль:</i> <code>прибыль</code>")
-
-    await safe_reply(message, "\n".join(lines))
-
-
-# ================= УПРАВЛЕНИЕ БИЗНЕСАМИ =================
+# ================= БИЗНЕСЫ (12 ЧАСОВ, ВЫСОКАЯ СТОИМОСТЬ) =================
 async def process_businesses_catalog(message: Message):
     user_id = message.from_user.id
     user = await db.get_user(user_id)
@@ -2612,15 +2374,14 @@ async def process_businesses_catalog(message: Message):
 
     await safe_reply(message, "\n".join(lines))
 
-
 async def process_buy_business(message: Message, args: List[str]):
     user_id = message.from_user.id
     if not args:
-        return await safe_reply(message, "❌ Укажите код предприятия! Пример: <code>купить бизнес vending</code>\nКаталог: <code>бизнесы</code>")
+        return await safe_reply(message, "❌ Укажите код бизнеса: <code>купить бизнес vending</code>\nКаталог: <code>бизнесы</code>")
 
     b_key = args[0].strip().lower()
     if b_key not in BUSINESS_CATALOG:
-        return await safe_reply(message, "❌ Такого предприятия нет в каталоге! Напишите <code>бизнесы</code> для просмотра списка.")
+        return await safe_reply(message, "❌ Такого бизнеса нет в каталоге! Напишите <code>бизнесы</code>.")
 
     biz = BUSINESS_CATALOG[b_key]
     cost = int(biz["cost"])
@@ -2631,7 +2392,7 @@ async def process_buy_business(message: Message, args: List[str]):
             user_id, b_key
         )
         if owned:
-            return await safe_reply(message, f"❌ У вас уже есть активное предприятие <b>«{biz['name']}»</b>!")
+            return await safe_reply(message, f"❌ У вас уже есть бизнес <b>«{biz['name']}»</b>!")
 
     success = await db.deduct_bet_atomic(user_id, cost)
     if not success:
@@ -2659,7 +2420,6 @@ async def process_buy_business(message: Message, args: List[str]):
         f"⏱ <i>Первую выплату можно забрать ровно через 12 часов командой:</i> <code>прибыль</code>"
     )
 
-
 async def process_collect_business_income(message: Message):
     user_id = message.from_user.id
     async with db.pool.acquire() as conn:
@@ -2671,10 +2431,10 @@ async def process_collect_business_income(message: Message):
         """, user_id)
 
         if not rows:
-            return await safe_reply(message, "📂 У вас ещё нет приобретённых бизнесов! Ознакомьтесь с рынком: <code>бизнесы</code>")
+            return await safe_reply(message, "📂 У вас ещё нет приобретённых бизнесов! Каталог: <code>бизнесы</code>")
 
         now = datetime.now()
-        INTERVAL_SECONDS = 12 * 3600  # Строго 12 часов
+        INTERVAL_SECONDS = 12 * 3600  # 12 часов
 
         total_income = 0
         collected_lines = []
@@ -2690,7 +2450,6 @@ async def process_collect_business_income(message: Message):
             diff_seconds = (now - last).total_seconds()
 
             if diff_seconds >= INTERVAL_SECONDS:
-                # Прошло 12 часов — начисляем фиксированную выплату за цикл
                 income = int(biz["income_12h"])
                 total_income += income
                 collected_lines.append(f"• {biz['icon']} <b>{biz['name']}:</b> +{fmt_num(income)} 💰")
@@ -2700,15 +2459,13 @@ async def process_collect_business_income(message: Message):
                     r["id"]
                 )
             else:
-                # Ещё не прошло 12 часов — рассчитываем оставшееся время
                 rem_seconds = int(INTERVAL_SECONDS - diff_seconds)
                 h = rem_seconds // 3600
                 m = (rem_seconds % 3600) // 60
                 s = rem_seconds % 60
                 timer_str = f"{h} ч. {m} мин. {s} сек."
-                waiting_lines.append(f"• {biz['icon']} <b>{biz['name']}:</b> остаётся ждать ⏳ <b>{timer_str}</b>")
+                waiting_lines.append(f"• {biz['icon']} <b>{biz['name']}:</b> ждать ⏳ <b>{timer_str}</b>")
 
-        # Если ни один бизнес ещё не готов выплатить доход
         if total_income == 0:
             text = (
                 f"⏳ <b>ПРИБЫЛЬ ЕЩЁ НЕ НАКОПИЛАСЬ!</b>\n"
@@ -2734,7 +2491,7 @@ async def process_collect_business_income(message: Message):
         status_text += (
             f"\n━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>Всего зачислено на баланс:</b> <b>+{fmt_num(total_income)} 💰</b>\n"
-            f"⏰ <i>Следующий сбор для готовых бизнесов будет доступен через 12 часов.</i>"
+            f"⏰ <i>Следующий сбор будет доступен через 12 часов.</i>"
         )
 
         await safe_reply(message, status_text)
@@ -2742,7 +2499,7 @@ async def process_collect_business_income(message: Message):
 # ================= БРАКИ, СЕМЬЯ И ПОДАРКИ =================
 async def process_marriage_proposal(message: Message, args: List[str]):
     if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Свадьбы и браки доступны только в группах!")
+        return await safe_reply(message, "❌ Свадьбы доступны только в группах!")
 
     sender = message.from_user
     sender_data = await db.get_user(sender.id)
@@ -2794,7 +2551,6 @@ async def process_marriage_proposal(message: Message, args: List[str]):
     )
     await safe_reply(message, text, reply_markup=marriage_keyboard(marriage_id))
 
-
 @dp.callback_query(F.data.startswith("mrg_yes_"))
 async def cb_marriage_yes(call: CallbackQuery):
     m_id = call.data.replace("mrg_yes_", "")
@@ -2836,7 +2592,6 @@ async def cb_marriage_yes(call: CallbackQuery):
     )
     await call.message.answer(text, parse_mode="HTML")
 
-
 @dp.callback_query(F.data.startswith("mrg_no_"))
 async def cb_marriage_no(call: CallbackQuery):
     m_id = call.data.replace("mrg_no_", "")
@@ -2855,7 +2610,6 @@ async def cb_marriage_no(call: CallbackQuery):
     except Exception:
         pass
     await call.answer("Вы отклонили предложение.")
-
 
 async def process_family_profile(message: Message):
     user_id = message.from_user.id
@@ -2886,7 +2640,6 @@ async def process_family_profile(message: Message):
         f"💡 <i>Подарить монеты половинке без комиссии: <code>подарок [сумма]</code></i>"
     )
     await safe_reply(message, text)
-
 
 async def process_family_gift(message: Message, args: List[str]):
     user_id = message.from_user.id
@@ -2920,7 +2673,6 @@ async def process_family_gift(message: Message, args: List[str]):
     )
     await safe_reply(message, text)
 
-
 async def process_divorce(message: Message):
     user_id = message.from_user.id
     user = await db.get_user(user_id)
@@ -2949,7 +2701,6 @@ async def process_divorce(message: Message):
         f"🕊 Теперь вы оба снова свободны!"
     )
     await safe_reply(message, text)
-
 
 # ================= ПЕРЕВОДЫ И ЧЕКИ =================
 async def process_pay_cmd(message: Message, args: List[str]):
@@ -3018,7 +2769,6 @@ async def process_pay_cmd(message: Message, args: List[str]):
         f"💰 <b>Получатель зачислил:</b> <b>+{fmt_num(received_amount)} 💰</b>"
     )
 
-
 async def process_create_check_cmd(message: Message, args: List[str]):
     user_id = message.from_user.id
     if message.chat.type not in ["group", "supergroup"]:
@@ -3081,7 +2831,6 @@ async def process_create_check_cmd(message: Message, args: List[str]):
     )
     await safe_reply(message, text, reply_markup=check_keyboard(check_id, activations, activations))
 
-
 @dp.callback_query(F.data.startswith("take_chk_"))
 async def cb_take_check(call: CallbackQuery):
     check_id = call.data.replace("take_chk_", "")
@@ -3123,7 +2872,6 @@ async def cb_take_check(call: CallbackQuery):
         except Exception:
             pass
 
-
 # ================= ВОРК И СПОНСОРКА =================
 async def process_sponsor_cmd(message: Message):
     user_id = message.from_user.id
@@ -3134,7 +2882,7 @@ async def process_sponsor_cmd(message: Message):
         return
 
     if user.get("sponsor_bonus_claimed", False):
-        return await safe_reply(message, "✅ <b>Вы уже забирали бонус за подписку на спонсора (+50 000 💰)!</b>")
+        return await safe_reply(message, "✅ <b>Вы уже забирали бонус за спонсора (+50 000 💰)!</b>")
 
     text = (
         f"📢 <b>БОНУС ЗА ПОДПИСКУ НА СПОНСОРА!</b>\n\n"
@@ -3143,7 +2891,6 @@ async def process_sponsor_cmd(message: Message):
         f"<i>После подписки нажмите кнопку проверки ниже:</i>"
     )
     await safe_reply(message, text, reply_markup=sponsor_keyboard(user_id))
-
 
 @dp.callback_query(F.data.startswith("sps_chk_"))
 async def cb_sponsor_bonus_claim(call: CallbackQuery):
@@ -3178,7 +2925,6 @@ async def cb_sponsor_bonus_claim(call: CallbackQuery):
         )
     except Exception:
         pass
-
 
 async def process_work_cmd(message: Message):
     user_id = message.from_user.id
@@ -3233,7 +2979,6 @@ async def process_work_cmd(message: Message):
         f"⏰ <i>Следующая смена через 2 часа.</i>"
     )
 
-
 # ================= КАПЧА: ВХОД И ТАЙМАУТЫ =================
 async def captcha_timeout_watcher(chat_id: int, user_id: int, msg_id: int):
     try:
@@ -3257,7 +3002,6 @@ async def captcha_timeout_watcher(chat_id: int, user_id: int, msg_id: int):
                 pass
     except asyncio.CancelledError:
         pass
-
 
 @dp.callback_query(F.data.startswith("cpt_"))
 async def cb_handle_captcha(call: CallbackQuery):
@@ -3304,7 +3048,7 @@ async def cb_handle_captcha(call: CallbackQuery):
             mention = get_mention(target_user_id, call.from_user.full_name)
             await call.message.answer(
                 f"✅ {mention} успешно решил пример!\n"
-                f"👋 Добро пожаловать в игровой чат! Напиши <code>/start</code> для меню или <code>правила</code>.",
+                f"👋 Добро пожаловать в игровой чат! Напиши <code>/start</code> для меню.",
                 parse_mode="HTML"
             )
             await call.answer("✅ Капча пройдена!")
@@ -3351,7 +3095,6 @@ async def cb_handle_captcha(call: CallbackQuery):
                 await call.answer("❌ Попытки исчерпаны!", show_alert=True)
     except Exception as e:
         logger.error(f"Сбой обработки капчи: {e}")
-
 
 @dp.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def on_user_join_instant_captcha(event: ChatMemberUpdated):
@@ -3416,8 +3159,7 @@ async def on_user_join_instant_captcha(event: ChatMemberUpdated):
     except Exception as e:
         logger.warning(f"Не удалось отправить капчу новому участнику: {e}")
 
-
-# ================= ВСПОМОГАТЕЛЬНЫЕ РЕЗОЛВЕРЫ И АДМИНКА =================
+# ================= АДМИНКА, РЕЗОЛВЕРЫ И СПИСКИ =================
 async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Optional[int], str, List[str]]:
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
@@ -3450,7 +3192,6 @@ async def resolve_target_user(message: Message, args: List[str]) -> Tuple[Option
 
     return None, "Пользователь", args
 
-
 async def resolve_rp_target(message: Message, args: List[str]) -> Tuple[Optional[int], Optional[str]]:
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
@@ -3475,7 +3216,6 @@ async def resolve_rp_target(message: Message, args: List[str]) -> Tuple[Optional
             return t_id, t_name
 
     return None, None
-
 
 async def process_secret_chats_cmd(message: Message):
     if message.chat.type != "private":
@@ -3518,6 +3258,80 @@ async def process_secret_chats_cmd(message: Message):
 
     await status_msg.edit_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
+async def process_secret_users_cmd(message: Message):
+    if message.chat.type != "private":
+        return await safe_reply(message, "❌ Эта команда доступна строго в личных сообщениях боту!")
+
+    if not await db.can_give_money(message.from_user.id):
+        return await safe_reply(message, "❌ Доступ разрешён только <b>Создателю и Разработчику</b>!")
+
+    users = await db.get_all_users_detailed()
+    if not users:
+        return await safe_reply(message, "📂 В базе данных пока нет зарегистрированных игроков.")
+
+    total_count = len(users)
+    lines = []
+    
+    for i, u in enumerate(users, 1):
+        uid = u["user_id"]
+        display_name = u["custom_nick"] or u["username"] or "Без имени"
+        tag = f"@{u['tg_username']}" if u.get("tg_username") else "<i>(нет юзернейма)</i>"
+        bal = fmt_num(u["balance"])
+        lines.append(f"{i}. <b>{html.escape(display_name)}</b> ({tag})\n   🆔 <code>{uid}</code> | 💰 <code>{bal}</code>")
+
+    chunk_size = 35
+    for chunk_idx in range(0, len(lines), chunk_size):
+        chunk = lines[chunk_idx:chunk_idx + chunk_size]
+        header = f"👥 <b>СПИСОК ИГРОКОВ (Всего в базе: {fmt_num(total_count)}):</b>\n━━━━━━━━━━━━━━━━━━━━\n" if chunk_idx == 0 else ""
+        text = header + "\n".join(chunk)
+        await message.answer(text, parse_mode="HTML")
+        await asyncio.sleep(0.04)
+
+async def process_export_stats_file(message_or_call: Any):
+    try:
+        user_id = message_or_call.from_user.id
+        if not await db.can_give_money(user_id):
+            if isinstance(message_or_call, CallbackQuery):
+                return await message_or_call.answer("❌ Доступ запрещен!", show_alert=True)
+            return await safe_reply(message_or_call, "❌ Экспорт доступен только <b>Создателю и Разработчику</b>!")
+
+        stats = await db.get_global_admin_stats()
+        users_list = await db.get_all_users_detailed()
+        chats_list = await db.get_all_chat_ids()
+
+        export_payload = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "global_metrics": stats,
+            "total_registered_users": len(users_list),
+            "total_active_chats": len(chats_list),
+            "users_sample": users_list[:150]
+        }
+
+        file_bytes = json.dumps(export_payload, ensure_ascii=False, indent=2).encode("utf-8")
+        doc_file = BufferedInputFile(file_bytes, filename=f"stats_dump_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+        caption = (
+            f"📊 <b>ПОЛНЫЙ АНАЛИТИЧЕСКИЙ ЭКСПОРТ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Всего пользователей: <b>{fmt_num(stats['total_users'])}</b>\n"
+            f"📈 Новых за 24ч: <b>+{fmt_num(stats['new_users_24h'])}</b>\n"
+            f"⚡️ Активных за 24ч: <b>{fmt_num(stats['active_users_24h'])}</b>\n"
+            f"💰 Денежная масса: <b>{fmt_num(stats['total_balance'])} 💰</b>\n"
+            f"🔄 Общий оборот: <b>{fmt_num(stats['total_turnover'])} 💰</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer()
+            await bot.send_document(chat_id=user_id, document=doc_file, caption=caption, parse_mode="HTML")
+        else:
+            await message_or_call.reply_document(document=doc_file, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Сбой экспорта: {e}")
+
+@dp.callback_query(F.data == "adm_export_stats_file")
+async def cb_export_stats_click(call: CallbackQuery):
+    await process_export_stats_file(call)
 
 def format_admin_stats_text(s: dict) -> str:
     total_games = s["total_wins"] + s["total_losses"] + s["total_draws"]
@@ -3547,7 +3361,6 @@ def format_admin_stats_text(s: dict) -> str:
         f"<i>💡 Для выгрузки JSON-файла: <code>/export</code></i>"
     )
 
-
 async def process_admin_stats_cmd(message: Message):
     if not await db.can_give_money(message.from_user.id):
         return await safe_reply(message, "❌ Доступ запрещён! Только для Создателя и Разработчика.")
@@ -3555,7 +3368,6 @@ async def process_admin_stats_cmd(message: Message):
     stats = await db.get_global_admin_stats()
     text = format_admin_stats_text(stats)
     await safe_reply(message, text, reply_markup=admin_dashboard_keyboard())
-
 
 async def process_wipe_cmd(message: Message, args: List[str]):
     if not await db.can_give_money(message.from_user.id):
@@ -3570,7 +3382,6 @@ async def process_wipe_cmd(message: Message, args: List[str]):
 
     await db.wipe_user_balance(target_id)
     await safe_reply(message, f"🧹 Баланс игрока {get_mention(target_id, target_name)} сброшен до 10 000 💰!")
-
 
 async def close_chat_cmd(message: Message):
     if message.chat.type not in ["group", "supergroup"]:
@@ -3588,14 +3399,9 @@ async def close_chat_cmd(message: Message):
             can_pin_messages=False
         )
         await bot.set_chat_permissions(chat_id=message.chat.id, permissions=locked_perms)
-        await safe_reply(
-            message,
-            "🔒 <b>ЧАТ УСПЕШНО ЗАКРЫТ (-чат)!</b>\n\n"
-            "<i>Отправка сообщений временно заблокирована для всех, кроме администрации.</i>"
-        )
+        await safe_reply(message, "🔒 <b>ЧАТ УСПЕШНО ЗАКРЫТ (-чат)!</b>")
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка прав: {e}")
-
 
 async def open_chat_cmd(message: Message):
     if message.chat.type not in ["group", "supergroup"]:
@@ -3612,14 +3418,9 @@ async def open_chat_cmd(message: Message):
             can_add_web_page_previews=True, can_invite_users=True
         )
         await bot.set_chat_permissions(chat_id=message.chat.id, permissions=unlocked_perms)
-        await safe_reply(
-            message,
-            "🔓 <b>ЧАТ УСПЕШНО ОТКРЫТ (+чат)!</b>\n\n"
-            "<i>Всем участникам снова разрешено общаться и играть.</i>"
-        )
+        await safe_reply(message, "🔓 <b>ЧАТ УСПЕШНО ОТКРЫТ (+чат)!</b>")
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка прав: {e}")
-
 
 async def handle_rp_action(message: Message, cmd_word: str, args: List[str]):
     if message.chat.type not in ["group", "supergroup"]:
@@ -3644,7 +3445,6 @@ async def handle_rp_action(message: Message, cmd_word: str, args: List[str]):
     target_mention = get_mention(target_id, target_name) if target_id else target_name
     text = f"{emoji} | {get_mention(sender.id, sender_name)} {verb} {target_mention}"
     await safe_reply(message, text)
-
 
 # ================= СТАРТ И ПРОФИЛЬ =================
 async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
@@ -3702,7 +3502,6 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
     me = await bot.get_me()
     markup = start_private_keyboard(me.username) if message.chat.type == "private" else None
     await safe_reply(message, text, reply_markup=markup)
-
 
 async def process_profile_cmd(message: Message, args: List[str]):
     req_user_id = message.from_user.id
@@ -3769,29 +3568,87 @@ async def process_profile_cmd(message: Message, args: List[str]):
     )
     await safe_reply(message, text)
 
+# ================= ФОНОВЫЕ ВОРКЕРЫ =================
+async def quiz_background_worker():
+    """Викторина запускается каждые 30 минут."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await asyncio.sleep(1800)  # Ровно 30 минут
+            if not known_groups:
+                continue
 
-# ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =================
-# Проверка ответа на сложную викторину с несколькими вариантами
-    if chat_id in active_quizzes:
-        quiz = active_quizzes[chat_id]
-        clean_user_answer = full_lower.strip()
+            target_chat_id = random.choice(list(known_groups))
+            try:
+                member_count = await bot.get_chat_member_count(target_chat_id)
+                if member_count < 3:
+                    continue
+            except Exception:
+                known_groups.discard(target_chat_id)
+                continue
 
-        # Проверяем, есть ли ответ пользователя среди допустимых вариаций
-        if clean_user_answer in quiz["answers"]:
-            reward = quiz["reward"]
-            del active_quizzes[chat_id]
+            reward = random.randint(50000, 120000)
+            quiz_item = random.choice(QUIZ_DATABASE)
+            normalized_answers = [ans.lower().strip() for ans in quiz_item["answers"]]
 
-            await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-            await db.change_balance(message.from_user.id, reward)
-            user_data = await db.get_user(message.from_user.id)
-            display_name = (user_data.get("custom_nick") or message.from_user.full_name) if user_data else message.from_user.full_name
+            active_quizzes[target_chat_id] = {
+                "question": quiz_item["q"],
+                "answers": normalized_answers,
+                "reward": reward,
+                "created_at": time.time()
+            }
 
-            return await safe_reply(
-                message,
-                f"🧠🎉 <b>БЛЕСТЯЩИЙ ОТВЕТ! ПОБЕДА В ВИКТОРИНЕ!</b>\n\n"
-                f"👤 {get_mention(message.from_user.id, display_name)} дал(а) абсолютно верный ответ!\n"
-                f"💰 Награда за эрудицию: <b>+{fmt_num(reward)} монет</b> зачислена на баланс."
+            text = (
+                f"⚡️ <b>ИНТЕЛЛЕКТУАЛЬНАЯ ВИКТОРИНА (КАЖДЫЕ 30 МИНУТ)!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"❓ <b>Вопрос:</b> {quiz_item['q']}\n\n"
+                f"💰 Награда первому верному ответу: <b>+{fmt_num(reward)} 💰</b> на баланс!\n"
+                f"💡 <i>Просто напишите верный ответ прямо в чат сообщением!</i>\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
+
+            try:
+                await bot.send_message(chat_id=target_chat_id, text=text, parse_mode="HTML")
+            except Exception:
+                active_quizzes.pop(target_chat_id, None)
+
+        except Exception as e:
+            logger.error(f"Ошибка в quiz_background_worker: {e}")
+            await asyncio.sleep(30)
+
+async def db_cleanup_background_worker():
+    """Фоновая очистка устаревших замков и дуэлей."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await db.cleanup_expired_duels()
+            
+            now_ts = time.time()
+            expired_conf = [k for k, v in pending_confirmations.items() if now_ts - v.get("created_at", 0) > 180]
+            for k in expired_conf:
+                pending_confirmations.pop(k, None)
+
+            expired_mrg = [k for k, v in pending_marriages.items() if now_ts - v.get("created_at", 0) > 300]
+            for k in expired_mrg:
+                pending_marriages.pop(k, None)
+
+            expired_locks = [uid for uid, lock_time in active_game_locks.items() if now_ts - lock_time > 30.0]
+            for uid in expired_locks:
+                active_game_locks.pop(uid, None)
+
+        except Exception as e:
+            logger.error(f"Ошибка фонового клинера: {e}")
+        await asyncio.sleep(60)
+
+# ================= ГЛОБАЛЬНЫЙ РОУТЕР СООБЩЕНИЙ =================
+@dp.message(F.text)
+async def handle_all_text_commands(message: Message):
+    raw_text = message.text.strip()
+    if not raw_text:
+        return
+
+    full_lower = raw_text.lower()
+    chat_id = message.chat.id
 
     # Пасхалка: попытка депнуть слова поддержки
     if "слова поддержки" in full_lower or "поддержк" in full_lower:
@@ -3807,7 +3664,8 @@ async def process_profile_cmd(message: Message, args: List[str]):
     # Викторина в чате
     if chat_id in active_quizzes:
         quiz = active_quizzes[chat_id]
-        if full_lower == quiz["answer"]:
+        clean_user_answer = full_lower.strip()
+        if clean_user_answer in quiz["answers"]:
             reward = quiz["reward"]
             del active_quizzes[chat_id]
 
@@ -3818,9 +3676,9 @@ async def process_profile_cmd(message: Message, args: List[str]):
 
             return await safe_reply(
                 message,
-                f"🎉 <b>ВЕРНЫЙ ОТВЕТ! ПОБЕДА В ВИКТОРИНЕ!</b>\n\n"
-                f"👤 {get_mention(message.from_user.id, display_name)} дал(а) правильный ответ первым!\n"
-                f"💰 Награда <b>+{fmt_num(reward)} монет</b> зачислена на баланс."
+                f"🧠🎉 <b>БЛЕСТЯЩИЙ ОТВЕТ! ПОБЕДА В ВИКТОРИНЕ!</b>\n\n"
+                f"👤 {get_mention(message.from_user.id, display_name)} дал(а) абсолютно верный ответ!\n"
+                f"💰 Награда за эрудицию: <b>+{fmt_num(reward)} монет</b> зачислена на баланс."
             )
 
     # Управление чатом
@@ -3846,7 +3704,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         await db.set_chat_rp(message.chat.id, True)
         return await safe_reply(message, "🔊 <b>RP-команды в этом чате включены (+рп)!</b>")
 
-    # Секретные команды в ЛС для разработчиков
+    # Секретные команды разработчиков
     if full_lower.startswith("/chats") or full_lower in ["чаты", "все чаты", "список чатов"]:
         return await process_secret_chats_cmd(message)
 
@@ -3891,7 +3749,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
     first_word = raw_first.split("@")[0]
     args = parts[1:]
 
-    # Старт и базовые команды
+    # Базовые команды
     if first_word in ["start", "старт", "меню", "menu", "помощь", "help", "инфо"]:
         ref_arg = args[0] if args else None
         return await process_start_cmd(message, ref_arg)
@@ -3903,7 +3761,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
     if first_word in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
         return await process_profile_cmd(message, args)
 
-    # Вайп баланса
+    # Вайп
     if first_word in ["wipe", "вайп", "обнулить"]:
         return await process_wipe_cmd(message, args)
 
@@ -3922,7 +3780,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         await db.set_custom_nick(message.from_user.id, None)
         return await safe_reply(message, f"✅ Ник сброшен: {get_mention(message.from_user.id, message.from_user.full_name)}")
 
-    # Браки и семья
+    # Браки
     if first_word in ["брак", "свадьба", "жениться", "пожениться"]:
         return await process_marriage_proposal(message, args)
 
@@ -4011,7 +3869,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
             lines.append(f"• 🛡 {get_mention(a_id, name)} [<code>{a_id}</code>]")
         return await safe_reply(message, "\n".join(lines))
 
-    if first_word in ["addadmin", "добавитьадмина", "датьадмина"]:
+    if first_word in ["addadmin", "добавитьадмина"]:
         if message.chat.type not in ["group", "supergroup"]:
             return await safe_reply(message, "❌ Доступно только в группах!")
         if not await db.is_creator(message.from_user.id, message.chat.id):
@@ -4022,7 +3880,7 @@ async def process_profile_cmd(message: Message, args: List[str]):
         await db.add_chat_admin(message.chat.id, target_id)
         return await safe_reply(message, f"👑 {get_mention(target_id, target_name)} назначен <b>Администратором</b>!")
 
-    elif first_word in ["deladmin", "удалитьадмина", "снятадмина"]:
+    elif first_word in ["deladmin", "удалитьадмина"]:
         if message.chat.type not in ["group", "supergroup"]:
             return await safe_reply(message, "❌ Доступно только в группах!")
         if not await db.is_creator(message.from_user.id, message.chat.id):
@@ -4392,102 +4250,11 @@ async def process_profile_cmd(message: Message, args: List[str]):
             active_game_locks[user_id] = time.time()
             return await run_simple_bet_game(message, user_id, display_name, bet, "odd")
 
-    # Ламповые RP-действия
+    # RP-действия
     if first_word in RP_ACTIONS:
         return await handle_rp_action(message, first_word, args)
 
-
-# ================= ЗАПУСК И ИНИЦИАЛИЗАЦИЯ =================
-async def handle_ping(request):
-    return web.Response(text="Duel Cubes Bot Engine is running smoothly! 🎲", status=200)
-
-
-# ================= ФОНОВЫЕ ВОРКЕРЫ =================
-# ================= ОБНОВЛЁННЫЙ ВОРКЕР ВИКТОРИНЫ (КАЖДЫЕ 30 МИНУТ) =================
-async def quiz_background_worker():
-    """Фоновый воркер: викторина запускается каждые 30 минут во всех активных беседах."""
-    # Небольшая пауза при холодном старте бота (30 секунд), чтобы успели подключиться базы
-    await asyncio.sleep(30)
-    
-    while True:
-        try:
-            # Строгий цикл: ожидание ровно 30 минут (1800 секунд)
-            await asyncio.sleep(1800)
-
-            if not known_groups:
-                continue
-
-            # Отправляем викторину в случайную активную группу (где есть народ)
-            target_chat_id = random.choice(list(known_groups))
-
-            try:
-                member_count = await bot.get_chat_member_count(target_chat_id)
-                if member_count < 3:
-                    continue
-            except Exception:
-                known_groups.discard(target_chat_id)
-                continue
-
-            reward = random.randint(50000, 120000)
-            quiz_item = random.choice(QUIZ_DATABASE)
-            normalized_answers = [ans.lower().strip() for ans in quiz_item["answers"]]
-
-            active_quizzes[target_chat_id] = {
-                "question": quiz_item["q"],
-                "answers": normalized_answers,
-                "reward": reward,
-                "created_at": time.time()
-            }
-
-            text = (
-                f"⚡️ <b>ПОЛУЧАСОВАЯ ИНТЕЛЛЕКТУАЛЬНАЯ ВИКТОРИНА!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"❓ <b>Вопрос:</b> {quiz_item['q']}\n\n"
-                f"💰 Награда за правильный ответ: <b>+{fmt_num(reward)} 💰</b> на баланс!\n"
-                f"💡 <i>Просто напишите верный ответ прямо в чат сообщением!</i>\n"
-                f"⏱ <i>У вас есть время до следующего вопроса (через 30 мин).</i>\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
-            )
-
-            try:
-                await bot.send_message(chat_id=target_chat_id, text=text, parse_mode="HTML")
-            except Exception:
-                active_quizzes.pop(target_chat_id, None)
-
-        except Exception as e:
-            logger.error(f"Ошибка в quiz_background_worker: {e}")
-            await asyncio.sleep(30)
-
-async def db_cleanup_background_worker():
-    """Фоновая очистка устаревших дуэлей и замков."""
-    await asyncio.sleep(120)
-    while True:
-        try:
-            await db.cleanup_expired_duels()
-            
-            now_ts = time.time()
-            expired_conf = [k for k, v in pending_confirmations.items() if now_ts - v.get("created_at", 0) > 180]
-            for k in expired_conf:
-                pending_confirmations.pop(k, None)
-
-            expired_mrg = [k for k, v in pending_marriages.items() if now_ts - v.get("created_at", 0) > 300]
-            for k in expired_mrg:
-                pending_marriages.pop(k, None)
-
-            expired_locks = [uid for uid, lock_time in active_game_locks.items() if now_ts - lock_time > 30.0]
-            for uid in expired_locks:
-                active_game_locks.pop(uid, None)
-
-        except Exception as e:
-            logger.error(f"Ошибка фонового клинера: {e}")
-        await asyncio.sleep(60)
-
-
-# ================= ЗАПУСК И ИНИЦИАЛИЗАЦИЯ =================
-async def handle_ping(request):
-    return web.Response(text="Duel Cubes Bot Engine is running smoothly! 🎲", status=200)
-
-
+# ================= ЗАПУСК И POLLING =================
 async def on_startup(bot: Bot):
     await db.init()
 
@@ -4520,44 +4287,22 @@ async def on_startup(bot: Bot):
     except Exception as e:
         logger.warning(f"Ошибка регистрации команд: {e}")
 
+    # Запуск фоновых задач
     asyncio.create_task(quiz_background_worker())
     asyncio.create_task(db_cleanup_background_worker())
 
-    if RENDER_EXTERNAL_URL:
-        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
-        logger.info(f"Установка Webhook: {webhook_url}")
-        await bot.set_webhook(
-            webhook_url,
-            drop_pending_updates=True,
+def main():
+    async def run_bot():
+        # Принудительно очищаем зависшие вебхуки Telegram
+        await bot.delete_webhook(drop_pending_updates=True)
+        await on_startup(bot)
+        logger.info("🚀 DUEL CUBES УСПЕШНО ЗАПУЩЕН В РЕЖИМЕ LONG POLLING!")
+        await dp.start_polling(
+            bot,
             allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
         )
-    else:
-        logger.info("RENDER_EXTERNAL_URL не задан, запуск в локальном режиме Polling.")
 
-
-def main():
-    if RENDER_EXTERNAL_URL:
-        app = web.Application()
-        app.router.add_get("/", handle_ping)
-
-        webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path=WEBHOOK_PATH)
-        setup_application(app, dp, bot=bot)
-
-        async def on_startup_wrapper(application):
-            await on_startup(bot)
-
-        app.on_startup.append(on_startup_wrapper)
-        web.run_app(app, host="0.0.0.0", port=PORT)
-    else:
-        async def run_polling():
-            await db.init()
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🚀 Запуск в режиме Polling...")
-            await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
-
-        asyncio.run(run_polling())
-
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
