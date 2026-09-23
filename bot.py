@@ -3771,7 +3771,6 @@ async def process_profile_cmd(message: Message, args: List[str]):
 
 
 # ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =================
-@dp.message(F.text)
 # Проверка ответа на сложную викторину с несколькими вариантами
     if chat_id in active_quizzes:
         quiz = active_quizzes[chat_id]
