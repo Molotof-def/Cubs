@@ -15,6 +15,7 @@ import random
 import time
 import json
 import traceback
+from aiohttp import web
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple, Any, Set, Union
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
@@ -4292,18 +4293,36 @@ async def on_startup(bot: Bot):
     asyncio.create_task(quiz_background_worker())
     asyncio.create_task(db_cleanup_background_worker())
 
+async def health_check(request):
+    return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
+
 def main():
     async def run_bot():
-        # Принудительно очищаем зависшие вебхуки Telegram
+        # Сбрасываем старые вебхуки перед поллингом
         await bot.delete_webhook(drop_pending_updates=True)
         await on_startup(bot)
-        logger.info("🚀 DUEL CUBES УСПЕШНО ЗАПУЩЕН В РЕЖИМЕ LONG POLLING!")
+        logger.info("🚀 DUEL CUBES УСПЕШНО ЗАПУЩЕН!")
+
+        # Открываем веб-порт для Render и UptimeRobot
+        port = int(os.getenv("PORT", 8080))
+        app = web.Application()
+        app.router.add_get("/", health_check)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logger.info(f"🌐 Сервер слушает порт {port}")
+
+        # Запуск приёма сообщений Telegram
         await dp.start_polling(
             bot,
             allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
         )
 
     asyncio.run(run_bot())
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
