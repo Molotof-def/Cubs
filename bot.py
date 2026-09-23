@@ -17,7 +17,8 @@ import json
 import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple, Any, Set, Union
-
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
+from aiogram.filters import ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
 import asyncpg
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.exceptions import (
