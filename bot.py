@@ -4706,6 +4706,35 @@ async def on_startup(bot: Bot):
 async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
 
+async def db_cleanup_background_worker():
+    """Фоновая очистка устаревших дуэлей, подтверждений и блокировок."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await db.cleanup_expired_duels()
+            
+            now_ts = time.time()
+            expired_conf = [k for k, v in pending_confirmations.items() if now_ts - v.get("created_at", 0) > 180]
+            for k in expired_conf:
+                pending_confirmations.pop(k, None)
+
+            expired_mrg = [k for k, v in pending_marriages.items() if now_ts - v.get("created_at", 0) > 300]
+            for k in expired_mrg:
+                pending_marriages.pop(k, None)
+
+            expired_locks = [uid for uid, lock_time in active_game_locks.items() if now_ts - lock_time > 30.0]
+            for uid in expired_locks:
+                active_game_locks.pop(uid, None)
+
+        except Exception as e:
+            logger.error(f"Ошибка фонового клинера: {e}")
+        await asyncio.sleep(60)
+
+
+async def health_check(request):
+    return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
+
+
 def main():
     async def run_bot():
         # Сбрасываем старые вебхуки перед поллингом
@@ -4731,8 +4760,6 @@ def main():
 
     asyncio.run(run_bot())
 
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
