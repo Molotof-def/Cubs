@@ -312,17 +312,19 @@ LADDER_STEPS: Dict[int, float] = {
 }
 
 # Тяжёлая экономика: высокая стоимость, умеренный доход раз в 12 часов
+# Экономика: окупаемость ровно 5 дней (20% в сутки)
+# income_per_hour = cost / 120
 BUSINESS_CATALOG: Dict[str, Dict[str, Any]] = {
-    "vending": {"name": "Сеть вендинговых аппаратов", "cost": 1500000, "income_12h": 18000, "icon": "☕"},
-    "kiosk": {"name": "Круглосуточный павильон", "cost": 5000000, "income_12h": 55000, "icon": "🏪"},
-    "pc_club": {"name": "Киберспортивная арена", "cost": 18000000, "income_12h": 160000, "icon": "🖥"},
-    "car_wash": {"name": "Роботизированная автомойка", "cost": 50000000, "income_12h": 400000, "icon": "🚿"},
-    "logistics": {"name": "Логистический терминал", "cost": 140000000, "income_12h": 950000, "icon": "🚛"},
-    "crypto_farm": {"name": "ASIC Дата-центр", "cost": 350000000, "income_12h": 2200000, "icon": "⛏"},
-    "factory": {"name": "Нефтеперерабатывающий завод", "cost": 900000000, "income_12h": 5000000, "icon": "🏭"},
-    "casino": {"name": "Неоновое казино в Вегасе", "cost": 2500000000, "income_12h": 12500000, "icon": "🎰"},
-    "bank": {"name": "Транснациональный банк", "cost": 7000000000, "income_12h": 3200000, "icon": "🏦"},
-    "spaceport": {"name": "Орбитальный космодром", "cost": 20000000000, "income_12h": 85000000, "icon": "🚀"}
+    "vending":     {"name": "Сеть вендинговых аппаратов", "cost": 1500000,     "income_per_hour": 12500,     "icon": "☕"},
+    "kiosk":       {"name": "Круглосуточный павильон",    "cost": 5000000,     "income_per_hour": 41666,     "icon": "🏪"},
+    "pc_club":     {"name": "Киберспортивная арена",       "cost": 18000000,    "income_per_hour": 150000,    "icon": "🖥"},
+    "car_wash":    {"name": "Роботизированная автомойка",  "cost": 50000000,    "income_per_hour": 416666,    "icon": "🚿"},
+    "logistics":   {"name": "Логистический терминал",     "cost": 140000000,   "income_per_hour": 1166666,   "icon": "🚛"},
+    "crypto_farm": {"name": "ASIC Дата-центр",            "cost": 350000000,   "income_per_hour": 2916666,   "icon": "⛏"},
+    "factory":     {"name": "Нефтеперерабатывающий завод","cost": 900000000,   "income_per_hour": 7500000,   "icon": "🏭"},
+    "casino":      {"name": "Неоновое казино в Вегасе",   "cost": 2500000000,  "income_per_hour": 20833333,  "icon": "🎰"},
+    "bank":        {"name": "Транснациональный банк",     "cost": 7000000000,  "income_per_hour": 58333333,  "icon": "🏦"},
+    "spaceport":   {"name": "Орбитальный космодром",      "cost": 20000000000, "income_per_hour": 166666666, "icon": "🚀"}
 }
 
 RP_ACTIONS: Dict[str, Tuple[str, str]] = {
@@ -1601,80 +1603,162 @@ async def cb_confirm_no(call: CallbackQuery):
     await call.answer("Отменено.")
 
 # ================= РУЛЕТКА СМЕРТИ (МУТ 10 МИНУТ) =================
-async def run_death_roulette_game(message: Message, user_id: int, user_name: str, bet: int):
-    success = await db.deduct_bet_atomic(user_id, bet)
-    if not success:
-        user = await db.get_user(user_id)
-        user_bal = user["balance"] if user else 0
-        return await safe_reply(message, f"❌ Недостаточно монет для игры со смертью! Баланс: <b>{fmt_num(user_bal)} 💰</b>")
+# ================= ЕВРОПЕЙСКАЯ РУЛЕТКА (0-36) =================
+RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+BLACK_NUMBERS = {2, 4, 6, 8, 10, 11, 13, 15, 17, 20, 22, 24, 26, 28, 29, 31, 33, 35}
 
-    display_name = (await db.get_user(user_id)).get("custom_nick") or user_name
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+def get_roulette_color(number: int) -> Tuple[str, str]:
+    if number == 0:
+        return "ЗЕРО 🟢", "зеленый"
+    elif number in RED_NUMBERS:
+        return "КРАСНОЕ 🔴", "красный"
+    else:
+        return "ЧЁРНОЕ ⚫️", "черный"
 
-    all_nums = [1, 2, 3, 4, 5, 6]
-    death_numbers = random.sample(all_nums, 2)
-    safe_numbers = [n for n in all_nums if n not in death_numbers]
+async def process_roulette_game(message: Message, args: List[str]):
+    user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
+    user = await db.get_user(user_id)
+    user_bal = user["balance"] if user else 0
+    display_name = user.get("custom_nick") or message.from_user.full_name
 
-    intro_text = (
-        f"💀 <b>РУЛЕТКА СМЕРТИ НА КУБИКАХ!</b>\n\n"
-        f"👤 Игрок: {get_mention(user_id, display_name)}\n"
-        f"💰 Ставка: <b>{fmt_num(bet)} 💰</b> (Приз: <b>+{fmt_num(int(round(bet * 1.8)))} 💰</b>)\n\n"
-        f"☠️ <b>Смертельные числа:</b> [ <b>{death_numbers[0]}</b>, <b>{death_numbers[1]}</b> ]\n"
-        f"🛡 <b>Безопасные:</b> {safe_numbers}\n\n"
-        f"<i>Бросаем кубик... Если выпадет смерть — ставка сгорает и выдается мут на 10 минут!</i>"
-    )
-    await safe_reply(message, intro_text)
+    if len(args) < 2:
+        help_text = (
+            f"🎰 <b>ЕВРОПЕЙСКАЯ РУЛЕТКА (0 - 36)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <b>Формат команды:</b> <code>рулетка [исход] [ставка]</code>\n\n"
+            f"🎯 <b>Доступные исходы:</b>\n"
+            f"• 🔴 <b>Цвет (х2):</b> <code>кр</code>, <code>чер</code> (или <code>красное</code>, <code>черное</code>)\n"
+            f"• ⚖️ <b>Чётность (х2):</b> <code>чет</code>, <code>нечет</code>\n"
+            f"• 📊 <b>Половины (х2):</b> <code>1-18</code>, <code>19-36</code>\n"
+            f"• 📦 <b>Дюжины (х3):</b> <code>1-12</code>, <code>13-24</code>, <code>25-36</code>\n"
+            f"• 🟢 <b>Точное число (х36):</b> от <code>0</code> до <code>36</code>\n\n"
+            f"📝 <i>Примеры:</i>\n"
+            f"<code>рулетка кр 5000</code>\n"
+            f"<code>рулетка 0 10к</code>\n"
+            f"<code>рулетка 1-12 вабанк</code>"
+        )
+        return await safe_reply(message, help_text)
 
-    try:
-        dice_msg = await message.answer_dice(emoji="🎲")
-        await asyncio.sleep(2.5)
-        val = int(dice_msg.dice.value)
+    bet_target_raw = args[0].lower().strip()
+    bet_amount_raw = args[1]
 
-        if val in death_numbers:
-            await db.record_game(user_id, "loss")
-            await db.process_referral_loss(user_id, bet)
+    bet = parse_amount_string(bet_amount_raw, user_bal)
+    if bet is None or bet < 100:
+        return await safe_reply(message, f"❌ Минимальная ставка: <b>100 💰</b>! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
 
-            mute_applied = False
-            if message.chat.type in ["group", "supergroup"]:
-                try:
-                    until = datetime.now() + timedelta(minutes=10)
-                    await message.chat.restrict(
-                        user_id=user_id,
-                        permissions=ChatPermissions(can_send_messages=False),
-                        until_date=until
-                    )
-                    mute_applied = True
-                except Exception as m_err:
-                    logger.warning(f"Не удалось выдать мут в рулетке смерти: {m_err}")
+    # Определение типа ставки
+    multiplier = 0.0
+    bet_type_name = ""
 
-            mute_info = "\n🔇 <b>НАКАЗАНИЕ:</b> Вам выдан <b>мут на 10 минут</b> за поражение в смертельной рулетке!" if mute_applied else "\n💡 <i>(В ЛС мут не выдается)</i>"
-
-            res = (
-                f"👤 {get_mention(user_id, display_name)}\n"
-                f"🎲 Выпало число: [ <b>{val}</b> ] — <b>ЭТО СМЕРТЬ!</b>\n"
-                f"📉 Ставка сгорела: <b>-{fmt_num(bet)} 💰</b>"
-                f"{mute_info}"
-            )
-            await send_game_result(message, "loss", res, user_id=user_id)
+    if bet_target_raw in ["кр", "красное", "красный", "red", "к"]:
+        multiplier = 2.0
+        bet_type_name = "КРАСНОЕ 🔴 (x2)"
+    elif bet_target_raw in ["чер", "чёрное", "черное", "черный", "чёрный", "black", "ч"]:
+        multiplier = 2.0
+        bet_type_name = "ЧЁРНОЕ ⚫️ (x2)"
+    elif bet_target_raw in ["чет", "четное", "чётное", "even"]:
+        multiplier = 2.0
+        bet_type_name = "ЧЁТНОЕ ⚖️ (x2)"
+    elif bet_target_raw in ["нечет", "нечетное", "нечётное", "odd"]:
+        multiplier = 2.0
+        bet_type_name = "НЕЧЁТНОЕ 🎯 (x2)"
+    elif bet_target_raw in ["1-18", "малые"]:
+        multiplier = 2.0
+        bet_type_name = "1-18 (x2)"
+    elif bet_target_raw in ["19-36", "большие"]:
+        multiplier = 2.0
+        bet_type_name = "19-36 (x2)"
+    elif bet_target_raw == "1-12":
+        multiplier = 3.0
+        bet_type_name = "1-я ДЮЖИНА (1-12) (x3)"
+    elif bet_target_raw == "13-24":
+        multiplier = 3.0
+        bet_type_name = "2-я ДЮЖИНА (13-24) (x3)"
+    elif bet_target_raw == "25-36":
+        multiplier = 3.0
+        bet_type_name = "3-я ДЮЖИНА (25-36) (x3)"
+    elif bet_target_raw.isdigit():
+        num_target = int(bet_target_raw)
+        if 0 <= num_target <= 36:
+            multiplier = 36.0
+            color_badge = "🟢" if num_target == 0 else ("🔴" if num_target in RED_NUMBERS else "⚫️")
+            bet_type_name = f"ЧИСЛО [{num_target}] {color_badge} (x36)"
         else:
-            win = int(round(bet * 1.8))
-            await db.change_balance(user_id, win)
-            await db.record_game(user_id, "win")
+            return await safe_reply(message, "❌ Число на рулетке должно быть в диапазоне от 0 до 36!")
+    else:
+        return await safe_reply(message, "❌ Неверный исход! Доступно: <code>кр</code>, <code>чер</code>, <code>чет</code>, <code>нечет</code>, <code>1-12</code>, <code>13-24</code>, <code>25-36</code>, или число от <code>0</code> до <code>36</code>.")
 
-            res = (
-                f"👤 {get_mention(user_id, display_name)}\n"
-                f"🎲 Выпало число: [ <b>{val}</b> ] — <b>ВЫ ВЫЖИЛИ!</b>\n"
-                f"💰 Множитель: <b>x1.8</b>\n"
-                f"💵 Зачислено на баланс: <b>+{fmt_num(win)} 💰</b>"
-            )
-            await send_game_result(message, "win", res, user_id=user_id)
+    if not await db.deduct_bet_atomic(user_id, bet):
+        return await safe_reply(message, f"❌ Недостаточно средств! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
 
-    except Exception as e:
-        logger.error(f"Сбой рулетки смерти: {e}")
-        await db.refund_bet(user_id, bet)
-        await safe_reply(message, f"⚠️ Сбой сети! Ставка <b>{fmt_num(bet)} 💰</b> возвращена на баланс.")
-    finally:
-        active_game_locks.pop(user_id, None)
+    # Анимация и запуск шарика
+    intro_msg = await safe_reply(
+        message,
+        f"🎡 <b>КРУТИМ КОЛЕСО РУЛЕТКИ...</b>\n"
+        f"👤 Игрок: {get_mention(user_id, display_name)}\n"
+        f"🎯 Ставка на: <b>{bet_type_name}</b>\n"
+        f"💰 Сумма: <b>{fmt_num(bet)} 💰</b>\n\n"
+        f"⚪️ <i>Шарик бежит по секторам...</i>"
+    )
+
+    await asyncio.sleep(2.5)
+
+    # Генерация сектора от 0 до 36
+    rolled_number = random.randint(0, 36)
+    color_text, color_key = get_roulette_color(rolled_number)
+
+    # Проверка выигрыша
+    won = False
+    if rolled_number == 0:
+        if bet_target_raw == "0":
+            won = True
+    else:
+        if bet_target_raw in ["кр", "красное", "красный", "red", "к"] and color_key == "красный":
+            won = True
+        elif bet_target_raw in ["чер", "чёрное", "черное", "черный", "чёрный", "black", "ч"] and color_key == "черный":
+            won = True
+        elif bet_target_raw in ["чет", "четное", "чётное", "even"] and (rolled_number % 2 == 0):
+            won = True
+        elif bet_target_raw in ["нечет", "нечетное", "нечётное", "odd"] and (rolled_number % 2 != 0):
+            won = True
+        elif bet_target_raw in ["1-18", "малые"] and (1 <= rolled_number <= 18):
+            won = True
+        elif bet_target_raw in ["19-36", "большие"] and (19 <= rolled_number <= 36):
+            won = True
+        elif bet_target_raw == "1-12" and (1 <= rolled_number <= 12):
+            won = True
+        elif bet_target_raw == "13-24" and (13 <= rolled_number <= 24):
+            won = True
+        elif bet_target_raw == "25-36" and (25 <= rolled_number <= 36):
+            won = True
+        elif bet_target_raw.isdigit() and int(bet_target_raw) == rolled_number:
+            won = True
+
+    if won:
+        win_amount = int(round(bet * multiplier))
+        await db.change_balance(user_id, win_amount)
+        await db.record_game(user_id, "win")
+
+        result_text = (
+            f"👤 {get_mention(user_id, display_name)}\n"
+            f"🎡 Выпал сектор: [ <b>{rolled_number}</b> ] — <b>{color_text}</b>\n"
+            f"🎯 Ваша ставка: <b>{bet_type_name}</b>\n\n"
+            f"💰 Множитель: <b>x{multiplier}</b>\n"
+            f"💵 Выигрыш: <b>+{fmt_num(win_amount)} 💰</b>"
+        )
+        await send_game_result(message, "win", result_text, user_id=user_id)
+    else:
+        await db.record_game(user_id, "loss")
+        await db.process_referral_loss(user_id, bet)
+
+        result_text = (
+            f"👤 {get_mention(user_id, display_name)}\n"
+            f"🎡 Выпал сектор: [ <b>{rolled_number}</b> ] — <b>{color_text}</b>\n"
+            f"🎯 Ваша ставка: <b>{bet_type_name}</b>\n\n"
+            f"📉 Ставка проиграна: <b>-{fmt_num(bet)} 💰</b>"
+        )
+        await send_game_result(message, "loss", result_text, user_id=user_id)
 
 # ================= ИГРОВЫЕ РЕЖИМЫ: КУБИКИ, СЛОТЫ, СТАВКИ =================
 async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int):
@@ -2697,57 +2781,119 @@ async def process_businesses_catalog(message: Message):
     user_bal = user["balance"] if user else 0
 
     lines = [
-        "💼 <b>РЫНОК ВЫСОКОДОХОДНЫХ ПРЕДПРИЯТИЙ</b>",
+        "💼 <b>РЫНОК БИЗНЕСОВ (ОКУПАЕМОСТЬ 5 ДНЕЙ)</b>",
         "━━━━━━━━━━━━━━━━━━━━",
-        "⏱ <b>Регламент выплат:</b> прибыль начисляется <b>1 раз в 12 часов</b>.",
-        "<i>Инвестируйте монеты и создайте пассивный источник дохода!</i>\n"
+        "⏱ <b>Регламент:</b> прибыль накапливается каждый час.",
+        "📥 Забирать доход можно <b>раз в 6 часов</b> (копится до 48ч)!\n"
     ]
 
     for key, data in BUSINESS_CATALOG.items():
+        daily_income = data["income_per_hour"] * 24
         lines.append(
             f"{data['icon']} <b>{data['name']}</b> [<code>{key}</code>]\n"
-            f"  ├ 💵 Стоимость покупки: <code>{fmt_num(data['cost'])} 💰</code>\n"
-            f"  └ 📈 Доход: <b>+{fmt_num(data['income_12h'])} 💰 каждые 12 часов</b>"
+            f"  ├ 💵 Стоимость: <code>{fmt_num(data['cost'])} 💰</code>\n"
+            f"  ├ 📈 Доход в час: <code>+{fmt_num(data['income_per_hour'])} 💰</code>\n"
+            f"  └ 📅 Доход в сутки: <b>+{fmt_num(daily_income)} 💰</b> (окупаемость 5 дней)"
         )
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"💰 Ваш баланс: <b>{fmt_num(user_bal)} 💰</b>")
-    lines.append("💡 <i>Купить бизнес:</i> <code>купить бизнес [код]</code> (например: <code>купить бизнес vending</code>)")
+    lines.append("💡 <i>Купить:</i> <code>купить бизнес [код]</code> (например: <code>купить бизнес vending</code>)")
     lines.append("📥 <i>Собрать прибыль:</i> <code>прибыль</code>")
 
     await safe_reply(message, "\n".join(lines))
 
-async def process_buy_business(message: Message, args: List[str]):
+
+async def process_collect_business_income(message: Message):
     user_id = message.from_user.id
-    if not args:
-        return await safe_reply(message, "❌ Укажите код бизнеса: <code>купить бизнес vending</code>\nКаталог: <code>бизнесы</code>")
-
-    b_key = args[0].strip().lower()
-    if b_key not in BUSINESS_CATALOG:
-        return await safe_reply(message, "❌ Такого бизнеса нет в каталоге! Напишите <code>бизнесы</code>.")
-
-    biz = BUSINESS_CATALOG[b_key]
-    cost = int(biz["cost"])
-
     async with db.pool.acquire() as conn:
-        owned = await conn.fetchval(
-            "SELECT 1 FROM user_businesses WHERE user_id = $1 AND business_key = $2",
-            user_id, b_key
-        )
-        if owned:
-            return await safe_reply(message, f"❌ У вас уже есть бизнес <b>«{biz['name']}»</b>!")
+        rows = await conn.fetch("""
+            SELECT id, business_key, last_collect 
+            FROM user_businesses 
+            WHERE user_id = $1
+            ORDER BY id ASC
+        """, user_id)
 
-    success = await db.deduct_bet_atomic(user_id, cost)
-    if not success:
-        user = await db.get_user(user_id)
-        user_bal = user["balance"] if user else 0
-        return await safe_reply(
-            message,
-            f"❌ Недостаточно средств для покупки!\n"
-            f"💵 Стоимость: <b>{fmt_num(cost)} 💰</b>\n"
-            f"💰 Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>"
+        if not rows:
+            return await safe_reply(message, "📂 У вас ещё нет приобретённых бизнесов! Каталог: <code>бизнесы</code>")
+
+        now = datetime.now()
+        MIN_COLLECT_SECONDS = 6 * 3600  # Минимум 6 часов между сборами
+        MAX_ACCUMULATE_SECONDS = 48 * 3600  # Копится до 48 часов
+
+        total_income = 0
+        collected_lines = []
+        waiting_lines = []
+
+        for r in rows:
+            b_key = r["business_key"]
+            if b_key not in BUSINESS_CATALOG:
+                continue
+
+            biz = BUSINESS_CATALOG[b_key]
+            last = r["last_collect"] or now
+            diff_seconds = (now - last).total_seconds()
+
+            if diff_seconds >= MIN_COLLECT_SECONDS:
+                # Накопление с ограничением в 48ч
+                accumulated_sec = min(diff_seconds, MAX_ACCUMULATE_SECONDS)
+                hours_passed = accumulated_sec / 3600.0
+                income = int(round(biz["income_per_hour"] * hours_passed))
+
+                total_income += income
+                collected_lines.append(
+                    f"• {biz['icon']} <b>{biz['name']}:</b> +{fmt_num(income)} 💰 "
+                    f"<i>(накоплено за {format_duration(int(accumulated_sec))})</i>"
+                )
+
+                await conn.execute(
+                    "UPDATE user_businesses SET last_collect = CURRENT_TIMESTAMP WHERE id = $1",
+                    r["id"]
+                )
+            else:
+                rem_seconds = int(MIN_COLLECT_SECONDS - diff_seconds)
+                h = rem_seconds // 3600
+                m = (rem_seconds % 3600) // 60
+                s = rem_seconds % 60
+                
+                # Сколько уже накопилось на данный момент
+                hours_passed = diff_seconds / 3600.0
+                current_acc = int(round(biz["income_per_hour"] * hours_passed))
+                
+                waiting_lines.append(
+                    f"• {biz['icon']} <b>{biz['name']}:</b> накапало <code>+{fmt_num(current_acc)} 💰</code> | "
+                    f"сбор через ⏳ <b>{h}ч {m}м {s}с</b>"
+                )
+
+        if total_income == 0:
+            text = (
+                f"⏳ <b>ПРИБЫЛЬ ЕЩЁ НАКАПЛИВАЕТСЯ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Сбор доступен минимум раз в 6 часов:</i>\n\n"
+                + "\n".join(waiting_lines) +
+                f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <i>Прибыль не сгорает и продолжает расти! Возвращайтесь позже.</i>"
+            )
+            return await safe_reply(message, text)
+
+        await db.change_balance(user_id, total_income)
+
+        status_text = (
+            f"💼 <b>УСПЕШНЫЙ СБОР ПРИБЫЛИ С БИЗНЕСОВ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n".join(collected_lines)
         )
 
+        if waiting_lines:
+            status_text += "\n\n⏳ <b>Остальные предприятия:</b>\n" + "\n".join(waiting_lines)
+
+        status_text += (
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Всего зачислено на баланс:</b> <b>+{fmt_num(total_income)} 💰</b>\n"
+            f"⏰ <i>Следующий сбор для снятых бизнесов откроется через 6 часов.</i>"
+        )
+
+        await safe_reply(message, status_text)
     async with db.pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO user_businesses (user_id, business_key, last_collect)
@@ -3814,7 +3960,7 @@ async def process_start_cmd(message: Message, ref_arg: Optional[str] = None):
         f"└ 📢 <code>бонус спонсора</code> — подарок <b>+50 000 💰</b>\n\n"
         f"🎲 <b>Список игр:</b>\n"
         f"<blockquote expandable>"
-        f"💀 <code>смерть [ставка]</code> — Рулетка Смерти (x1.8 или мут 10м!)\n"
+        f"🎡 <code>рулетка [исход] [ставка]</code> — Европейская рулетка (0-36, до x36!)\n"
         f"🎰 <code>слоты [ставка]</code> — Казино-слоты (до х35!)\n"
         f"🗿✂️ <code>кнб [ставка] @username</code> — Камень, ножницы, бумага\n"
         f"🎁 <code>чек [сумма] [кол-во]</code> — раздача чека в чате\n"
@@ -4540,20 +4686,9 @@ async def handle_all_text_commands(message: Message):
                 active_game_locks.pop(user_id, None)
 
     # Запуск игр
-    if first_word in ["смерть", "death", "рулетка"]:
-        user_id = message.from_user.id
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
-        user = await db.get_user(user_id)
-        user_bal = int(user["balance"]) if user else 0
-        display_name = (user.get("custom_nick") or message.from_user.full_name) if user else message.from_user.full_name
-
-        bet = parse_amount_string(args[0] if args else "100", user_bal)
-        if bet is None or bet < 100:
-            return await safe_reply(message, f"❌ Укажите ставку от 100 💰! Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>")
-        if await check_bet_confirmation(message, user_id, display_name, bet, "death", run_death_roulette_game):
-            active_game_locks[user_id] = time.time()
-            return await run_death_roulette_game(message, user_id, display_name, bet)
-
+    # Европейская рулетка 0-36
+    if first_word in ["рулетка", "рул", "roulette"]:
+        return await process_roulette_game(message, args)
     if first_word in ["slots", "слоты"]:
         user_id = message.from_user.id
         await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
