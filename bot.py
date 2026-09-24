@@ -1310,7 +1310,17 @@ def report_admin_keyboard(target_id: int):
     builder.button(text="🛑 Бан", callback_data=f"adm_ban_{target_id}")
     builder.adjust(3)
     return builder.as_markup()
+def top_menu_keyboard(current_tab: str = "balance"):
+    builder = InlineKeyboardBuilder()
+    b_text = "💰 Баланс 🟢" if current_tab == "balance" else "💰 Баланс"
+    t_text = "🔄 Оборот 🟢" if current_tab == "turnover" else "🔄 Оборот"
+    w_text = "🏆 Победы 🟢" if current_tab == "wins" else "🏆 Победы"
 
+    builder.button(text=b_text, callback_data="top_tab_balance")
+    builder.button(text=t_text, callback_data="top_tab_turnover")
+    builder.button(text=w_text, callback_data="top_tab_wins")
+    builder.adjust(3)
+    return builder.as_markup()
 # ================= ИСПРАВЛЕНИЕ КНОПОК ТОПА =================
 @dp.callback_query(F.data.startswith("top_tab_"))
 async def cb_switch_top_tab(call: CallbackQuery):
@@ -1352,7 +1362,6 @@ async def cb_switch_top_tab(call: CallbackQuery):
     except Exception:
         pass
     await call.answer()
-
 @dp.callback_query(F.data.startswith("tmsg_"))
 async def cb_refresh_top_messages(call: CallbackQuery):
     parts = call.data.split("_")
