@@ -4247,20 +4247,25 @@ async def force_quiz_cmd(message: Message):
         return await safe_reply(message, "❌ Викторину можно запускать только в беседах/группах!")
 
     await launch_new_quiz(message.chat.id, forced_by_admin=True)
-# ================= ГЛОБАЛЬНЫЙ РОУТЕР СООБЩЕНИЙ =================
+# ================= ГЛОБАЛЬНЫЙ РОУТЕР СООБЩЕНИЙ ================
 @dp.message()
 async def handle_all_text_commands(message: Message):
-    # ОБЯЗАТЕЛЬНО: объявляем базовые переменные первыми
+    # 1. Текст и базовые сущности
+    raw_text = message.text or ""
+    text_raw = raw_text
     chat_id = message.chat.id
     user_id = message.from_user.id
-    text_raw = message.text or ""
-    words = text_raw.split()
-    if not words:
+
+    # 2. Разбивка на слова и аргументы
+    parts = raw_text.split()
+    words = parts
+    if not parts:
         return
 
-    first_word = words[0].lower()
-    full_lower = text_raw.strip().lower()
-
+    # 3. Переменные, на которые сейчас ругается Pylance
+    first_word = parts[0].lower()
+    full_lower = raw_text.strip().lower()
+    args = parts[1:]
     # Дальше идёт проверка активных викторин (строка 4274):
     if chat_id in active_quizzes:
         quiz = active_quizzes[chat_id]
