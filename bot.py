@@ -2776,7 +2776,26 @@ async def process_clan_deposit(message: Message, args: List[str]):
 
 # ================= БИЗНЕСЫ (12 ЧАСОВ, ВЫСОКАЯ СТОИМОСТЬ) =================
 from datetime import datetime, timezone
-
+async def process_businesses_catalog(message: Message):
+    text = (
+        "🏢 <b>РЫНОК БИЗНЕСОВ</b> 🏢\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Купленные предприятия приносят пассивный доход!</i>\n"
+        "<i>Окупаемость: 5 дней. Сбор прибыли: каждые 6 часов.</i>\n\n"
+    )
+    for key, b in BUSINESS_CATALOG.items():
+        text += (
+            f"{b['icon']} <b>{b['name']}</b>\n"
+            f"  └ Код: <code>{key}</code>\n"
+            f"  └ Стоимость: <b>{fmt_num(b['cost'])} 💰</b>\n"
+            f"  └ Доход: <b>+{fmt_num(b['income_per_hour'])} 💰/час</b>\n\n"
+        )
+    text += (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🛒 <b>Покупка:</b> <code>купить бизнес [код]</code>\n"
+        "📥 <b>Сбор прибыли:</b> <code>прибыль</code>"
+    )
+    await safe_reply(message, text)
 # 1. ПОКУПКА БИЗНЕСА
 async def process_buy_business(message: Message, args: List[str]):
     user_id = message.from_user.id
@@ -4261,7 +4280,13 @@ async def handle_all_text_commands(message: Message):
     # Каталог бизнесов
     if full_lower in ["бизнесы", "бизнес", "/businesses"]:
         return await process_businesses_catalog(message)
+    text_raw = message.text or ""
+    words = text_raw.split()
+    if not words:
+        return
 
+    first_word = words[0].lower()
+    full_lower = text_raw.strip().lower()
     # Сбор прибыли
     if full_lower in ["прибыль", "доход", "собрать", "сбор"]:
         return await process_collect_business_income(message)
