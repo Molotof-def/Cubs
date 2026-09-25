@@ -4337,7 +4337,7 @@ async def handle_all_text_commands(message: Message):
     words = text_raw.split()
     if not words:
         return
-
+    ref_arg = args[0] if args else None
     first_word = words[0].lower()
     full_lower = text_raw.strip().lower()
     # Сбор прибыли
