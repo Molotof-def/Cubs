@@ -4250,27 +4250,18 @@ async def force_quiz_cmd(message: Message):
 # ================= ГЛОБАЛЬНЫЙ РОУТЕР СООБЩЕНИЙ =================
 @dp.message()
 async def handle_all_text_commands(message: Message):
+    # ОБЯЗАТЕЛЬНО: объявляем базовые переменные первыми
+    chat_id = message.chat.id
+    user_id = message.from_user.id
     text_raw = message.text or ""
     words = text_raw.split()
     if not words:
         return
 
-    # ВОТ ЭТИ ДВЕ СТРОЧКИ УСТРАНЯЮТ ОШИБКУ NameError:
     first_word = words[0].lower()
     full_lower = text_raw.strip().lower()
 
-    # Проверка команд бизнеса
-    if full_lower in ["бизнесы", "бизнес", "/businesses"]:
-        return await process_businesses_catalog(message)
-
-    if full_lower in ["прибыль", "доход", "собрать", "сбор"]:
-        return await process_collect_business_income(message)
-
-    if full_lower.startswith("купить бизнес") or full_lower.startswith("купить"):
-        cmd_args = [w for w in words[1:] if w.lower() != "бизнес"]
-        return await process_buy_business(message, cmd_args)
-
-    # Викторина в чате
+    # Дальше идёт проверка активных викторин (строка 4274):
     if chat_id in active_quizzes:
         quiz = active_quizzes[chat_id]
         clean_user_answer = full_lower.strip()
