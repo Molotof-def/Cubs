@@ -2775,37 +2775,72 @@ async def process_clan_deposit(message: Message, args: List[str]):
     )
 
 # ================= БИЗНЕСЫ (12 ЧАСОВ, ВЫСОКАЯ СТОИМОСТЬ) =================
-async def process_businesses_catalog(message: Message):
+from datetime import datetime, timezone
+
+# 1. ПОКУПКА БИЗНЕСА
+async def process_buy_business(message: Message, args: List[str]):
     user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
     user = await db.get_user(user_id)
     user_bal = user["balance"] if user else 0
 
-    lines = [
-        "💼 <b>РЫНОК БИЗНЕСОВ (ОКУПАЕМОСТЬ 5 ДНЕЙ)</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "⏱ <b>Регламент:</b> прибыль накапливается каждый час.",
-        "📥 Забирать доход можно <b>раз в 6 часов</b> (копится до 48ч)!\n"
-    ]
-
-    for key, data in BUSINESS_CATALOG.items():
-        daily_income = data["income_per_hour"] * 24
-        lines.append(
-            f"{data['icon']} <b>{data['name']}</b> [<code>{key}</code>]\n"
-            f"  ├ 💵 Стоимость: <code>{fmt_num(data['cost'])} 💰</code>\n"
-            f"  ├ 📈 Доход в час: <code>+{fmt_num(data['income_per_hour'])} 💰</code>\n"
-            f"  └ 📅 Доход в сутки: <b>+{fmt_num(daily_income)} 💰</b> (окупаемость 5 дней)"
+    if not args:
+        return await safe_reply(
+            message,
+            "❌ <b>Укажите код бизнеса!</b>\n"
+            "Пример: <code>купить бизнес vending</code>\n"
+            "Каталог предприятий: <code>бизнесы</code>"
         )
 
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💰 Ваш баланс: <b>{fmt_num(user_bal)} 💰</b>")
-    lines.append("💡 <i>Купить:</i> <code>купить бизнес [код]</code> (например: <code>купить бизнес vending</code>)")
-    lines.append("📥 <i>Собрать прибыль:</i> <code>прибыль</code>")
+    # Защита от лишних слов: берем последнее слово или первый аргумент после команды
+    b_key = args[-1].lower().strip()
 
-    await safe_reply(message, "\n".join(lines))
+    if b_key not in BUSINESS_CATALOG:
+        return await safe_reply(
+            message,
+            f"❌ Предприятие с кодом <code>{b_key}</code> не найдено!\n"
+            f"Посмотрите список доступных кодов в команде: <code>бизнесы</code>"
+        )
+
+    biz = BUSINESS_CATALOG[b_key]
+    cost = biz["cost"]
+
+    if user_bal < cost:
+        return await safe_reply(
+            message,
+            f"❌ Недостаточно средств!\n"
+            f"💵 Стоимость: <b>{fmt_num(cost)} 💰</b>\n"
+            f"💰 Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>"
+        )
+
+    # Атомарное списание средств
+    if not await db.deduct_bet_atomic(user_id, cost):
+        return await safe_reply(message, f"❌ Не удалось списать монеты. Проверьте баланс!")
+
+    # Запись покупки в БД с установкой текущего времени сбора
+    async with db.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_businesses (user_id, business_key, last_collect)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+        """, user_id, b_key)
+
+    await safe_reply(
+        message,
+        f"🎉 <b>ПОЗДРАВЛЯЕМ С ПРИОБРЕТЕНИЕМ БИЗНЕСА!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏢 Предприятие: {biz['icon']} <b>{biz['name']}</b>\n"
+        f"💸 Списано: <b>-{fmt_num(cost)} 💰</b>\n"
+        f"📈 Доход: <b>+{fmt_num(biz['income_per_hour'])} 💰/час</b>\n"
+        f"📥 Первый сбор прибыли станет доступен через <b>6 часов</b>!\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
 
 
+# 2. СБОР НАКОПЛЕННОЙ ПРИБЫЛИ
 async def process_collect_business_income(message: Message):
     user_id = message.from_user.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=message.chat.id)
+
     async with db.pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, business_key, last_collect 
@@ -2815,11 +2850,16 @@ async def process_collect_business_income(message: Message):
         """, user_id)
 
         if not rows:
-            return await safe_reply(message, "📂 У вас ещё нет приобретённых бизнесов! Каталог: <code>бизнесы</code>")
+            return await safe_reply(
+                message,
+                "📂 У вас ещё нет приобретённых предприятий!\n"
+                "Ознакомьтесь с рынком: <code>бизнесы</code>"
+            )
 
-        now = datetime.now()
-        MIN_COLLECT_SECONDS = 6 * 3600  # Минимум 6 часов между сборами
-        MAX_ACCUMULATE_SECONDS = 48 * 3600  # Копится до 48 часов
+        # Текущее время с поддержкой таймзоны UTC (как в PostgreSQL)
+        now = datetime.now(timezone.utc)
+        MIN_COLLECT_SECONDS = 6 * 3600      # 6 часов
+        MAX_ACCUMULATE_SECONDS = 48 * 3600  # Максимум накопления 48 часов
 
         total_income = 0
         collected_lines = []
@@ -2831,11 +2871,21 @@ async def process_collect_business_income(message: Message):
                 continue
 
             biz = BUSINESS_CATALOG[b_key]
-            last = r["last_collect"] or now
-            diff_seconds = (now - last).total_seconds()
+            last = r["last_collect"]
+
+            # Если last_collect пустой, инициализируем его
+            if last is None:
+                last = now
+                await conn.execute("UPDATE user_businesses SET last_collect = CURRENT_TIMESTAMP WHERE id = $1", r["id"])
+
+            # Приводим дату к UTC, если она пришла без таймзоны
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+
+            diff_seconds = max(0.0, (now - last).total_seconds())
 
             if diff_seconds >= MIN_COLLECT_SECONDS:
-                # Накопление с ограничением в 48ч
+                # Накопление с ограничением 48ч
                 accumulated_sec = min(diff_seconds, MAX_ACCUMULATE_SECONDS)
                 hours_passed = accumulated_sec / 3600.0
                 income = int(round(biz["income_per_hour"] * hours_passed))
@@ -2843,9 +2893,10 @@ async def process_collect_business_income(message: Message):
                 total_income += income
                 collected_lines.append(
                     f"• {biz['icon']} <b>{biz['name']}:</b> +{fmt_num(income)} 💰 "
-                    f"<i>(накоплено за {format_duration(int(accumulated_sec))})</i>"
+                    f"<i>(за {format_duration(int(accumulated_sec))})</i>"
                 )
 
+                # Сбрасываем таймер сбора для этого предприятия
                 await conn.execute(
                     "UPDATE user_businesses SET last_collect = CURRENT_TIMESTAMP WHERE id = $1",
                     r["id"]
@@ -2855,135 +2906,45 @@ async def process_collect_business_income(message: Message):
                 h = rem_seconds // 3600
                 m = (rem_seconds % 3600) // 60
                 s = rem_seconds % 60
-                
-                # Сколько уже накопилось на данный момент
+
                 hours_passed = diff_seconds / 3600.0
                 current_acc = int(round(biz["income_per_hour"] * hours_passed))
-                
+
                 waiting_lines.append(
                     f"• {biz['icon']} <b>{biz['name']}:</b> накапало <code>+{fmt_num(current_acc)} 💰</code> | "
                     f"сбор через ⏳ <b>{h}ч {m}м {s}с</b>"
                 )
 
+        # Если 6 часов ещё ни у одного бизнеса не прошло
         if total_income == 0:
             text = (
                 f"⏳ <b>ПРИБЫЛЬ ЕЩЁ НАКАПЛИВАЕТСЯ!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Сбор доступен минимум раз в 6 часов:</i>\n\n"
+                f"<i>Сбор открывается через 6 часов после покупки или прошлого сбора:</i>\n\n"
                 + "\n".join(waiting_lines) +
-                f"\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 <i>Прибыль не сгорает и продолжает расти! Возвращайтесь позже.</i>"
+                f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <i>Прибыль не сгорает и продолжает расти каждый час (до 48 часов)!</i>"
             )
             return await safe_reply(message, text)
 
+        # Зачисляем сумму на баланс
         await db.change_balance(user_id, total_income)
 
-        status_text = (
-            f"💼 <b>УСПЕШНЫЙ СБОР ПРИБЫЛИ С БИЗНЕСОВ</b>\n"
+        res_text = (
+            f"💼 <b>УСПЕШНЫЙ СБОР ПРИБЫЛИ!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             + "\n".join(collected_lines)
         )
 
         if waiting_lines:
-            status_text += "\n\n⏳ <b>Остальные предприятия:</b>\n" + "\n".join(waiting_lines)
+            res_text += "\n\n⏳ <b>Остальные предприятия:</b>\n" + "\n".join(waiting_lines)
 
-        status_text += (
+        res_text += (
             f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>Всего зачислено на баланс:</b> <b>+{fmt_num(total_income)} 💰</b>\n"
-            f"⏰ <i>Следующий сбор для снятых бизнесов откроется через 6 часов.</i>"
+            f"💰 <b>Зачислено на баланс:</b> <b>+{fmt_num(total_income)} 💰</b>"
         )
 
-        await safe_reply(message, status_text)
-    async with db.pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO user_businesses (user_id, business_key, last_collect)
-            VALUES ($1, $2, CURRENT_TIMESTAMP)
-        """, user_id, b_key)
-
-    await safe_reply(
-        message,
-        f"🎉 <b>ПРЕДПРИЯТИЕ УСПЕШНО ПРИОБРЕТЕНО!</b>\n\n"
-        f"{biz['icon']} Вы стали владельцем: <b>«{biz['name']}»</b>!\n"
-        f"💵 Инвестировано: <code>{fmt_num(cost)} 💰</code>\n"
-        f"📈 Доходность: <b>+{fmt_num(biz['income_12h'])} 💰 раз в 12 часов</b>.\n\n"
-        f"⏱ <i>Первую выплату можно забрать ровно через 12 часов командой:</i> <code>прибыль</code>"
-    )
-
-async def process_collect_business_income(message: Message):
-    user_id = message.from_user.id
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, business_key, last_collect 
-            FROM user_businesses 
-            WHERE user_id = $1
-            ORDER BY id ASC
-        """, user_id)
-
-        if not rows:
-            return await safe_reply(message, "📂 У вас ещё нет приобретённых бизнесов! Каталог: <code>бизнесы</code>")
-
-        now = datetime.now()
-        INTERVAL_SECONDS = 12 * 3600  # 12 часов
-
-        total_income = 0
-        collected_lines = []
-        waiting_lines = []
-
-        for r in rows:
-            b_key = r["business_key"]
-            if b_key not in BUSINESS_CATALOG:
-                continue
-
-            biz = BUSINESS_CATALOG[b_key]
-            last = r["last_collect"] or now
-            diff_seconds = (now - last).total_seconds()
-
-            if diff_seconds >= INTERVAL_SECONDS:
-                income = int(biz["income_12h"])
-                total_income += income
-                collected_lines.append(f"• {biz['icon']} <b>{biz['name']}:</b> +{fmt_num(income)} 💰")
-
-                await conn.execute(
-                    "UPDATE user_businesses SET last_collect = CURRENT_TIMESTAMP WHERE id = $1",
-                    r["id"]
-                )
-            else:
-                rem_seconds = int(INTERVAL_SECONDS - diff_seconds)
-                h = rem_seconds // 3600
-                m = (rem_seconds % 3600) // 60
-                s = rem_seconds % 60
-                timer_str = f"{h} ч. {m} мин. {s} сек."
-                waiting_lines.append(f"• {biz['icon']} <b>{biz['name']}:</b> ждать ⏳ <b>{timer_str}</b>")
-
-        if total_income == 0:
-            text = (
-                f"⏳ <b>ПРИБЫЛЬ ЕЩЁ НЕ НАКОПИЛАСЬ!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Выплата начисляется строго раз в 12 часов:</i>\n\n"
-                + "\n".join(waiting_lines) +
-                f"\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 <i>Возвращайтесь позже, когда таймер истечёт!</i>"
-            )
-            return await safe_reply(message, text)
-
-        await db.change_balance(user_id, total_income)
-
-        status_text = (
-            f"💼 <b>СБОР ПРИБЫЛИ С ПРЕДПРИЯТИЙ (12 ЧАСОВ)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n".join(collected_lines)
-        )
-
-        if waiting_lines:
-            status_text += "\n\n⏳ <b>Остальные предприятия:</b>\n" + "\n".join(waiting_lines)
-
-        status_text += (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>Всего зачислено на баланс:</b> <b>+{fmt_num(total_income)} 💰</b>\n"
-            f"⏰ <i>Следующий сбор будет доступен через 12 часов.</i>"
-        )
-
-        await safe_reply(message, status_text)
+        await safe_reply(message, res_text)
 
 # ================= БРАКИ, СЕМЬЯ И ПОДАРКИ =================
 async def process_marriage_proposal(message: Message, args: List[str]):
@@ -4297,24 +4258,21 @@ async def handle_all_text_commands(message: Message):
         return await process_clan_deposit(message, parts_c_dep[2:])
 
     # Бизнесы
-    if full_lower in ["бизнес", "бизнесы", "рынок бизнеса"]:
+    # Каталог бизнесов
+    if full_lower in ["бизнесы", "бизнес", "/businesses"]:
         return await process_businesses_catalog(message)
 
-    if full_lower.startswith("купить бизнес"):
-        parts_biz = raw_text.split()
-        b_args = parts_biz[2:] if len(parts_biz) > 2 else []
-        return await process_buy_business(message, b_args)
-
-    if full_lower in ["прибыль", "доход", "собрать прибыль"]:
+    # Сбор прибыли
+    if full_lower in ["прибыль", "доход", "собрать", "сбор"]:
         return await process_collect_business_income(message)
 
-    parts = raw_text.split()
-    if not parts:
-        return
-
-    raw_first = parts[0].lower().lstrip("/")
-    first_word = raw_first.split("@")[0]
-    args = parts[1:]
+    # Покупка бизнеса (ловит как "купить бизнес vending", так и "купить vending")
+    if full_lower.startswith("купить бизнес") or full_lower.startswith("купить"):
+        # Отрезаем ключевые слова
+        cmd_args = text_raw.split()[1:]
+        if cmd_args and cmd_args[0].lower() == "бизнес":
+            cmd_args = cmd_args[1:]
+        return await process_buy_business(message, cmd_args)
 
     # Базовые команды
     if first_word in ["start", "старт", "меню", "menu", "помощь", "help", "инфо"]:
