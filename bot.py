@@ -1822,7 +1822,100 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         )
     finally:
         active_game_locks.pop(user_id, None)
+import asyncio
 
+async def process_theory_five_game(message: Message, args: List[str]):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+
+    try:
+        await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=chat_id)
+        user = await db.get_user(user_id)
+        balance = user["balance"] if user else 0
+
+        # Парсим ставку
+        if not args:
+            return await safe_reply(
+                message,
+                "🎲 <b>РЕЖИМ: ТЕОРИЯ 5</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Бросается <b>3 кубика</b>. Если выпадает ровно <b>5-5-5</b> — куш <b>x50</b>!\n\n"
+                "Использование: <code>теория 5 [ставка]</code> или <code>т5 [ставка]</code>\n"
+                "Пример: <code>т5 50000</code> или <code>т5 все</code>"
+            )
+
+        bet_raw = args[0].lower().replace("к", "000").replace("k", "000")
+        if bet_raw in ["все", "всё", "all"]:
+            bet = balance
+        else:
+            try:
+                bet = int(bet_raw)
+            except ValueError:
+                return await safe_reply(message, "❌ Некорректная сумма ставки!")
+
+        if bet <= 0:
+            return await safe_reply(message, "❌ Ставка должна быть больше 0!")
+
+        if balance < bet:
+            return await safe_reply(
+                message,
+                f"❌ Недостаточно средств!\n"
+                f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>"
+            )
+
+        # Списываем ставку атомарно
+        if not await db.deduct_bet_atomic(user_id, bet):
+            return await safe_reply(message, "❌ Ошибка списания баланса. Попробуйте снова.")
+
+        display_name = user.get("custom_nick") or message.from_user.full_name
+        mention = get_mention(user_id, display_name)
+
+        # Отправляем 3 настоящих анимированных кубика Telegram
+        dice1 = await message.answer_dice(emoji="🎲")
+        dice2 = await message.answer_dice(emoji="🎲")
+        dice3 = await message.answer_dice(emoji="🎲")
+
+        # Ждем 3.5 секунды, пока докрутится анимация броска
+        await asyncio.sleep(3.5)
+
+        val1 = dice1.dice.value
+        val2 = dice2.dice.value
+        val3 = dice3.dice.value
+
+        # Проверка победы (все три кубика равны 5)
+        if val1 == 5 and val2 == 5 and val3 == 5:
+            win_amount = bet * 50
+            await db.change_balance(user_id, win_amount)
+            new_bal = balance - bet + win_amount
+
+            res_text = (
+                f"⚡ <b>ТЕОРИЯ 5 СРАБОТАЛА! ДЖЕКПОТ x50!</b> ⚡\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 Игрок: {mention}\n"
+                f"🎲 Выпало: [ <b>5</b> | <b>5</b> | <b>5</b> ] 🔥\n"
+                f"💵 Ставка: <code>{fmt_num(bet)} 💰</code>\n"
+                f"🏆 <b>Выигрыш: +{fmt_num(win_amount)} 💰 (x50)</b>\n"
+                f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            new_bal = balance - bet
+            res_text = (
+                f"🎲 <b>ТЕОРИЯ 5 НЕ СЫГРАЛА</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 Игрок: {mention}\n"
+                f"🎲 Выпало: [ <b>{val1}</b> | <b>{val2}</b> | <b>{val3}</b> ]\n"
+                f"💵 Проигрыш: <code>-{fmt_num(bet)} 💰</code>\n"
+                f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Для победы на всех кубиках должна выпасть 5 (шанс 1 к 216).</i>"
+            )
+
+        await safe_reply(message, res_text)
+
+    except Exception as e:
+        logger.error(f"Ошибка в теории 5: {e}", exc_info=True)
+        await safe_reply(message, f"❌ Произошла ошибка: <code>{e}</code>")
 async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
@@ -4635,7 +4728,11 @@ async def handle_all_text_commands(message: Message):
     # Дуэли
     if first_word in ["duel", "дуэль", "вызов"]:
         return await process_duel_cmd(message, args)
-
+    # Режим "Теория 5"
+    if full_lower.startswith("теория 5") or full_lower.startswith("т5"):
+        # Если ввели "теория 5 1000", отсекаем вводные слова и берем ставку
+        game_args = [w for w in words[1:] if w.lower() not in ["5", "пять"]]
+        return await process_theory_five_game(message, game_args)
     # Реф
     if first_word in ["ref", "реф", "партнерка"]:
         me = await bot.get_me()
