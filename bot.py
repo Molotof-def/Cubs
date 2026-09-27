@@ -5141,15 +5141,33 @@ async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
 
 
-async def main():
-    # 1. ОБЯЗАТЕЛЬНО: Подключаем базу данных перед опросом Telegram!
-    logger.info("Подключение к PostgreSQL...")
-    await db.init() # или то имя функции, которое создаёт db.pool в твоём классе Database
+async def start_web_server():
+    """Фоновый мини веб-сервер, чтобы Render и мониторинг видели порт 200 OK"""
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Веб-сервер успешно слушает порт: {port}")
 
-    # 2. Сброс старых вебхуков
+async def main():
+    # 1. Подключаем базу данных
+    logger.info("Подключение к PostgreSQL...")
+    await db.init()
+
+    # 2. Регистрируем команды и фоновые задачи
+    await on_startup(bot)
+
+    # 3. Поднимаем веб-порт для Render и мониторинга (закроет ошибку 503)
+    await start_web_server()
+
+    # 4. Сбрасываем старые вебхуки
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # 3. Бесконечный цикл опроса
+    # 5. Цикл long polling
     while True:
         try:
             logger.info("Запуск polling aiogram...")
