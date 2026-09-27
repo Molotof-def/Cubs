@@ -4371,37 +4371,7 @@ async def cb_handle_quiz_click(call: CallbackQuery):
         quiz["blocked_users"].add(user_id)
         await call.answer("❌ Ответ неверный! Вы выбыли из этой викторины.", show_alert=True)
 
-async def quiz_background_worker():
-    """Фоновый таймер викторины: запускается строго раз в 30 минут."""
-    await asyncio.sleep(30)
-    while True:
-        try:
-            await asyncio.sleep(1800)  # 30 минут
-            if not known_groups:
-                continue
 
-            target_chat_id = random.choice(list(known_groups))
-            try:
-                member_count = await bot.get_chat_member_count(target_chat_id)
-                if member_count < 3:
-                    continue
-            except Exception:
-                known_groups.discard(target_chat_id)
-                continue
-
-            await launch_new_quiz(target_chat_id, forced_by_admin=False)
-        except Exception as e:
-            logger.error(f"Ошибка в quiz_background_worker: {e}")
-            await asyncio.sleep(30)
-
-async def force_quiz_cmd(message: Message):
-    """Принудительный вызов викторины только Разработчиком и Создателем."""
-    user_id = message.from_user.id
-    if user_id != DEV_ID and user_id not in CREATOR_IDS:
-        return await safe_reply(message, "❌ Запуск викторины доступен только <b>Главному разработчику и Создателю</b>!")
-
-    if message.chat.type not in ["group", "supergroup"]:
-        return await safe_reply(message, "❌ Викторину можно запускать только в беседах/группах!")
 async def process_pay_cmd(message: Message, args: List[str]):
     sender_id = message.from_user.id
     await db.register_user(sender_id, message.from_user.full_name, message.from_user.username)
@@ -4480,24 +4450,15 @@ async def handle_all_text_commands(message: Message):
     full_lower = raw_text.strip().lower()
     args = parts[1:]
     # Дальше идёт проверка активных викторин (строка 4274):
-    if chat_id in active_quizzes:
-        quiz = active_quizzes[chat_id]
-        clean_user_answer = full_lower.strip()
-        if clean_user_answer in quiz["answers"]:
-            reward = quiz["reward"]
-            del active_quizzes[chat_id]
+    # Ручной запуск викторины Создателем / Разработчиком
+    if first_word in ["/quiz", "викторина", "квиз", "/квиз"]:
+        return await force_quiz_cmd(message)
 
-            await db.register_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-            await db.change_balance(message.from_user.id, reward)
-            user_data = await db.get_user(message.from_user.id)
-            display_name = (user_data.get("custom_nick") or message.from_user.full_name) if user_data else message.from_user.full_name
-
-            return await safe_reply(
-                message,
-                f"🧠🎉 <b>БЛЕСТЯЩИЙ ОТВЕТ! ПОБЕДА В ВИКТОРИНЕ!</b>\n\n"
-                f"👤 {get_mention(message.from_user.id, display_name)} дал(а) абсолютно верный ответ!\n"
-                f"💰 Награда за эрудицию: <b>+{fmt_num(reward)} монет</b> зачислена на баланс."
-            )
+# Ручной запрос бэкапа базы прямо сейчас в ЛС
+    if full_lower in ["/backup", "бэкап", "бекап", "сделать бэкап"]:
+        if message.from_user.id != DEV_ID and message.from_user.id not in CREATOR_IDS:
+            return await safe_reply(message, "❌ Команда доступна только Главному разработчику!")
+        return await process_export_stats_file(message)
 
     # Управление чатом
     if full_lower in ["-чат", "закрыть чат", "/closechat", "чат закрыть"]:
@@ -5075,7 +5036,88 @@ async def handle_all_text_commands(message: Message):
     # RP-действия
     if first_word in RP_ACTIONS:
         return await handle_rp_action(message, first_word, args)
+# ================= ВИКТОРИНА И БЭКАПЫ =================
+async def force_quiz_cmd(message: Message):
+    """Принудительный запуск викторины Создателем / Разработчиком"""
+    user_id = message.from_user.id
+    if user_id != DEV_ID and user_id not in CREATOR_IDS:
+        return await safe_reply(message, "❌ Запуск викторины доступен только <b>Главному разработчику и Создателю</b>!")
 
+    if message.chat.type not in ["group", "supergroup"]:
+        return await safe_reply(message, "❌ Викторину можно запускать только в беседах!")
+
+    await launch_new_quiz(message.chat.id, forced_by_admin=True)
+
+async def quiz_background_worker():
+    """Фоновый запуск викторины раз в 30 минут в активных беседах"""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.sleep(1800)  # Каждые 30 минут
+            chat_ids = await db.get_all_chat_ids()
+            if not chat_ids:
+                continue
+
+            target_chat_id = random.choice(chat_ids)
+            try:
+                member_count = await bot.get_chat_member_count(target_chat_id)
+                if member_count < 3:
+                    continue
+                await launch_new_quiz(target_chat_id, forced_by_admin=False)
+            except Exception as chat_err:
+                logger.debug(f"Пропуск чата {target_chat_id} для викторины: {chat_err}")
+        except Exception as e:
+            logger.error(f"Ошибка в quiz_background_worker: {e}")
+            await asyncio.sleep(30)
+
+async def daily_backup_worker():
+    """Ежедневно в 03:00 UTC выгружает базу и отправляет файл главному разработчику"""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            target_time = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target_time:
+                target_time += timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"Следующий авто-бэкап базы запланирован через {format_duration(int(wait_seconds))}")
+            await asyncio.sleep(wait_seconds)
+
+            stats = await db.get_global_admin_stats()
+            users_list = await db.get_all_users_detailed()
+            chats_list = await db.get_all_chat_ids()
+
+            backup_data = {
+                "backup_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "total_users": len(users_list),
+                "total_chats": len(chats_list),
+                "global_stats": stats,
+                "users": users_list
+            }
+
+            file_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+            date_str = datetime.now().strftime("%Y%m%d_%H%M")
+            backup_file = BufferedInputFile(file_bytes, filename=f"backup_duelcubes_{date_str}.json")
+
+            caption = (
+                f"📦 <b>ЕЖЕДНЕВНЫЙ АВТО-БЭКАП БАЗЫ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 Дата: <code>{datetime.now().strftime('%d.%m.%Y %H:%M')}</code>\n"
+                f"👥 Всего игроков: <b>{fmt_num(len(users_list))}</b>\n"
+                f"💬 Всего чатов: <b>{fmt_num(len(chats_list))}</b>\n"
+                f"💰 Общий банк: <b>{fmt_num(stats.get('total_balance', 0))} 💰</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Файл сформирован автоматически и отправлен на сохранение.</i>"
+            )
+
+            await bot.send_document(chat_id=DEV_ID, document=backup_file, caption=caption, parse_mode="HTML")
+            logger.info("Ежедневный бэкап успешно отправлен Главному разработчику!")
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            logger.error(f"Сбой ежедневного бэкапа: {e}", exc_info=True)
+            await asyncio.sleep(300)
 # ================= ЗАПУСК И POLLING =================
 async def on_startup(bot: Bot):
     await db.init()
@@ -5112,6 +5154,7 @@ async def on_startup(bot: Bot):
     # Запуск фоновых задач
     asyncio.create_task(quiz_background_worker())
     asyncio.create_task(db_cleanup_background_worker())
+    asyncio.create_task(daily_backup_worker())
 
 async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
