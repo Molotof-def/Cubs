@@ -1824,98 +1824,167 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         active_game_locks.pop(user_id, None)
 import asyncio
 
+import asyncio
+import time
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.exceptions import TelegramRetryAfter
+
+# Словарь для защиты от спама: {user_id: timestamp_последней_игры}
+theory5_cooldowns = {}
+THEORY5_COOLDOWN_SECONDS = 4  # Задержка между играми
+
+def get_theory5_retry_kb(bet: int) -> InlineKeyboardMarkup:
+    """Генерирует инлайн-кнопку для быстрого повтора ставки"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🔁 Повторить ({fmt_num(bet)} 💰)",
+                    callback_data=f"t5_retry:{bet}"
+                )
+            ]
+        ]
+    )
+
+async def run_theory5_round(bot_instance, chat_id: int, user_id: int, bet: int, reply_to_msg_id: int = None):
+    """Ядро игры: списание, бросок 3 кубиков, расчёт x54 и вывод с кнопкой"""
+    # 1. Антиспам проверка
+    now = time.time()
+    last_time = theory5_cooldowns.get(user_id, 0)
+    if now - last_time < THEORY5_COOLDOWN_SECONDS:
+        rem = round(THEORY5_COOLDOWN_SECONDS - (now - last_time), 1)
+        return await bot_instance.send_message(
+            chat_id,
+            f"⏳ <b>Не так быстро!</b> Подождите ещё <code>{rem} сек.</code> перед следующим броском.",
+            reply_to_message_id=reply_to_msg_id
+        )
+
+    # 2. Проверка баланса
+    user = await db.get_user(user_id)
+    balance = user["balance"] if user else 0
+
+    if bet <= 0:
+        return await bot_instance.send_message(chat_id, "❌ Ставка должна быть больше 0!", reply_to_message_id=reply_to_msg_id)
+
+    if balance < bet:
+        return await bot_instance.send_message(
+            chat_id,
+            f"❌ <b>Недостаточно средств!</b>\n"
+            f"💵 Требуется: <code>{fmt_num(bet)} 💰</code>\n"
+            f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>",
+            reply_to_message_id=reply_to_msg_id
+        )
+
+    # 3. Атомарное списание
+    if not await db.deduct_bet_atomic(user_id, bet):
+        return await bot_instance.send_message(chat_id, "❌ Ошибка списания средств. Попробуйте снова.", reply_to_message_id=reply_to_msg_id)
+
+    # Обновляем таймер антиспама
+    theory5_cooldowns[user_id] = time.time()
+
+    display_name = user.get("custom_nick") or "Игрок"
+    mention = get_mention(user_id, display_name)
+
+    # 4. Бросок 3 кубиков с защитой от Telegram Flood Limit
+    try:
+        d1 = await bot_instance.send_dice(chat_id, emoji="🎲")
+        await asyncio.sleep(0.3)
+        d2 = await bot_instance.send_dice(chat_id, emoji="🎲")
+        await asyncio.sleep(0.3)
+        d3 = await bot_instance.send_dice(chat_id, emoji="🎲")
+    except TelegramRetryAfter as e:
+        # Если Telegram всё же ограничил частоту запросов
+        await asyncio.sleep(e.retry_after)
+        d1 = await bot_instance.send_dice(chat_id, emoji="🎲")
+        d2 = await bot_instance.send_dice(chat_id, emoji="🎲")
+        d3 = await bot_instance.send_dice(chat_id, emoji="🎲")
+
+    # Ждём завершения анимации вращения костей
+    await asyncio.sleep(3.2)
+
+    val1 = d1.dice.value
+    val2 = d2.dice.value
+    val3 = d3.dice.value
+
+    retry_kb = get_theory5_retry_kb(bet)
+
+    # 5. Проверка победы (5-5-5) с множителем x54
+    if val1 == 5 and val2 == 5 and val3 == 5:
+        win_amount = bet * 54
+        await db.change_balance(user_id, win_amount)
+        new_bal = balance - bet + win_amount
+
+        win_text = (
+            f"⚡ <b>ТЕОРИЯ 5 ВЫБИЛА ДЖЕКПОТ x54!</b> ⚡\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Игрок: {mention}\n"
+            f"🎲 Выпало: [ <b>5</b> | <b>5</b> | <b>5</b> ] 🔥🔥🔥\n"
+            f"💵 Ставка: <code>{fmt_num(bet)} 💰</code>\n"
+            f"🏆 <b>Выигрыш: +{fmt_num(win_amount)} 💰 (x54)</b>\n"
+            f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        await bot_instance.send_message(chat_id, win_text, reply_markup=retry_kb, reply_to_message_id=reply_to_msg_id)
+    else:
+        new_bal = balance - bet
+        lose_text = (
+            f"🎲 <b>ТЕОРИЯ 5: МИМО</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Игрок: {mention}\n"
+            f"🎲 Выпало: [ <b>{val1}</b> | <b>{val2}</b> | <b>{val3}</b> ]\n"
+            f"💵 Проигрыш: <code>-{fmt_num(bet)} 💰</code>\n"
+            f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Выигрыш x54 даётся только при комбинации 5-5-5.</i>"
+        )
+        await bot_instance.send_message(chat_id, lose_text, reply_markup=retry_kb, reply_to_message_id=reply_to_msg_id)
+
+
 async def process_theory_five_game(message: Message, args: List[str]):
+    """Хэндлер вызова из чата"""
     user_id = message.from_user.id
     chat_id = message.chat.id
+    await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=chat_id)
 
+    if not args:
+        return await safe_reply(
+            message,
+            "🎲 <b>РЕЖИМ: ТЕОРИЯ 5 (x54)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Бросается 3 кубика. При выпадении <b>5-5-5</b> ставка умножается на <b>x54</b>!\n\n"
+            "Использование: <code>т5 [ставка]</code> или <code>теория 5 [ставка]</code>\n"
+            "Пример: <code>т5 50000</code> или <code>т5 все</code>"
+        )
+
+    user = await db.get_user(user_id)
+    balance = user["balance"] if user else 0
+
+    bet_raw = args[0].lower().replace("к", "000").replace("k", "000")
+    if bet_raw in ["все", "всё", "all"]:
+        bet = balance
+    else:
+        try:
+            bet = int(bet_raw)
+        except ValueError:
+            return await safe_reply(message, "❌ Некорректная сумма ставки!")
+
+    await run_theory5_round(message.bot, chat_id, user_id, bet, message.message_id)
+
+
+# Хэндлер нажатия на инлайн-кнопку реванша
+@dp.callback_query(lambda c: c.data and c.data.startswith("t5_retry:"))
+async def on_theory5_retry_callback(callback: CallbackQuery):
     try:
-        await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=chat_id)
-        user = await db.get_user(user_id)
-        balance = user["balance"] if user else 0
+        parts = callback.data.split(":")
+        bet = int(parts[1])
+        user_id = callback.from_user.id
+        chat_id = callback.message.chat.id
 
-        # Парсим ставку
-        if not args:
-            return await safe_reply(
-                message,
-                "🎲 <b>РЕЖИМ: ТЕОРИЯ 5</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "Бросается <b>3 кубика</b>. Если выпадает ровно <b>5-5-5</b> — куш <b>x50</b>!\n\n"
-                "Использование: <code>теория 5 [ставка]</code> или <code>т5 [ставка]</code>\n"
-                "Пример: <code>т5 50000</code> или <code>т5 все</code>"
-            )
-
-        bet_raw = args[0].lower().replace("к", "000").replace("k", "000")
-        if bet_raw in ["все", "всё", "all"]:
-            bet = balance
-        else:
-            try:
-                bet = int(bet_raw)
-            except ValueError:
-                return await safe_reply(message, "❌ Некорректная сумма ставки!")
-
-        if bet <= 0:
-            return await safe_reply(message, "❌ Ставка должна быть больше 0!")
-
-        if balance < bet:
-            return await safe_reply(
-                message,
-                f"❌ Недостаточно средств!\n"
-                f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>"
-            )
-
-        # Списываем ставку атомарно
-        if not await db.deduct_bet_atomic(user_id, bet):
-            return await safe_reply(message, "❌ Ошибка списания баланса. Попробуйте снова.")
-
-        display_name = user.get("custom_nick") or message.from_user.full_name
-        mention = get_mention(user_id, display_name)
-
-        # Отправляем 3 настоящих анимированных кубика Telegram
-        dice1 = await message.answer_dice(emoji="🎲")
-        dice2 = await message.answer_dice(emoji="🎲")
-        dice3 = await message.answer_dice(emoji="🎲")
-
-        # Ждем 3.5 секунды, пока докрутится анимация броска
-        await asyncio.sleep(3.5)
-
-        val1 = dice1.dice.value
-        val2 = dice2.dice.value
-        val3 = dice3.dice.value
-
-        # Проверка победы (все три кубика равны 5)
-        if val1 == 5 and val2 == 5 and val3 == 5:
-            win_amount = bet * 50
-            await db.change_balance(user_id, win_amount)
-            new_bal = balance - bet + win_amount
-
-            res_text = (
-                f"⚡ <b>ТЕОРИЯ 5 СРАБОТАЛА! ДЖЕКПОТ x50!</b> ⚡\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 Игрок: {mention}\n"
-                f"🎲 Выпало: [ <b>5</b> | <b>5</b> | <b>5</b> ] 🔥\n"
-                f"💵 Ставка: <code>{fmt_num(bet)} 💰</code>\n"
-                f"🏆 <b>Выигрыш: +{fmt_num(win_amount)} 💰 (x50)</b>\n"
-                f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
-            )
-        else:
-            new_bal = balance - bet
-            res_text = (
-                f"🎲 <b>ТЕОРИЯ 5 НЕ СЫГРАЛА</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 Игрок: {mention}\n"
-                f"🎲 Выпало: [ <b>{val1}</b> | <b>{val2}</b> | <b>{val3}</b> ]\n"
-                f"💵 Проигрыш: <code>-{fmt_num(bet)} 💰</code>\n"
-                f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Для победы на всех кубиках должна выпасть 5 (шанс 1 к 216).</i>"
-            )
-
-        await safe_reply(message, res_text)
-
+        await callback.answer()  # Подтверждаем клик в Telegram, чтобы не висели часики
+        await run_theory5_round(callback.bot, chat_id, user_id, bet, callback.message.message_id)
     except Exception as e:
-        logger.error(f"Ошибка в теории 5: {e}", exc_info=True)
-        await safe_reply(message, f"❌ Произошла ошибка: <code>{e}</code>")
+        logger.error(f"Ошибка в реванше теории 5: {e}", exc_info=True)
+        await callback.answer("❌ Не удалось запустить повторный бросок.", show_alert=True)
 async def run_doubledice_game(message: Message, user_id: int, user_name: str, bet: int):
     success = await db.deduct_bet_atomic(user_id, bet)
     if not success:
@@ -5017,31 +5086,24 @@ async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
 
 
-def main():
-    async def run_bot():
-        # Сбрасываем старые вебхуки перед поллингом
-        await bot.delete_webhook(drop_pending_updates=True)
-        await on_startup(bot)
-        logger.info("🚀 DUEL CUBES УСПЕШНО ЗАПУЩЕН!")
+async def main():
+    # Keep-alive сервер для Render
+    start_keep_alive()
 
-        # Открываем веб-порт для Render и UptimeRobot
-        port = int(os.getenv("PORT", 8080))
-        app = web.Application()
-        app.router.add_get("/", health_check)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logger.info(f"🌐 Сервер слушает порт {port}")
+    # Очищаем вебхуки перед стартом polling
+    await bot.delete_webhook(drop_pending_updates=True)
 
-        # Запуск приёма сообщений Telegram
-        await dp.start_polling(
-            bot,
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
-        )
-
-    asyncio.run(run_bot())
-
+    # Бесконечный цикл поддержания жизни
+    while True:
+        try:
+            logger.info("Запуск polling aiogram...")
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Остановка бота вручную.")
+            break
+        except Exception as e:
+            logger.error(f"Критический сбой polling: {e}. Перезапуск через 5 секунд...", exc_info=True)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
