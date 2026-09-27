@@ -1830,17 +1830,13 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
 theory_cooldowns: Dict[int, float] = {}
 THEORY_COOLDOWN_SECONDS: int = 4
 
-def get_theory_retry_kb(target_number: int, bet: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"🔁 Повторить Т{target_number} ({fmt_num(bet)} 💰)",
-                    callback_data=f"th_retry:{target_number}:{bet}"
-                )
-            ]
-        ]
+def get_theory_retry_kb(target_number: int, bet: int):
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"🔁 Повторить Т{target_number} ({fmt_num(bet)} 💰)",
+        callback_data=f"th_retry:{target_number}:{bet}"
     )
+    return builder.as_markup()
 
 async def safe_send_dice(bot_obj: Bot, chat_id: int):
     """Отправка костей с автоматическим ожиданием при Flood Control"""
