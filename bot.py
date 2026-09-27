@@ -1953,21 +1953,6 @@ async def parse_and_start_theory(message: Message, target_number: int, raw_args:
             message,
             f"🎲 <b>РЕЖИМ: ТЕОРИЯ {target_number} (x54)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Бросается 3 кубика. Если на всех выпадает <b>{target_number}</b> — куш <b>x54</b>!\n\n"
-            f"Использование: <code>т{target_number} [ставка]</code> или <code>теория {target_number} [ставка]</code>\n"
-            f"Пример: <code>т{target_number} 50к</code> или <code>т{target_number} все</code>"
-        )
-
-    bet = parse_amount_string(raw_args[0], balance)
-    if bet is None or bet <= 0:
-        return await safe_reply(message, "❌ Некорректная сумма ставки!")
-
-    await execute_theory_round(message.bot, chat_id, user_id, target_number, bet, message.message_id)
-    if not raw_args:
-        return await safe_reply(
-            message,
-            f"🎲 <b>РЕЖИМ: ТЕОРИЯ {target_number} (x54)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Бросается 3 кубика. Если на всех трёх выпадает <b>{target_number}</b> — выигрыш <b>x54</b>!\n\n"
             f"Использование: <code>т{target_number} [ставка]</code> или <code>теория {target_number} [ставка]</code>\n"
             f"Пример: <code>т{target_number} 50к</code> или <code>т{target_number} все</code>"
@@ -1977,11 +1962,12 @@ async def parse_and_start_theory(message: Message, target_number: int, raw_args:
     if bet is None or bet <= 0:
         return await safe_reply(message, "❌ Некорректная сумма ставки!")
 
-    await execute_theory_round(message.bot, chat_id, user_id, target_number, bet, message.message_id)
+    return await execute_theory_round(message.bot, chat_id, user_id, target_number, bet, message.message_id)
 
-# Коллбэк для кнопки «🔁 Повторить»
+# Хэндлер нажатия на инлайн-кнопку реванша
+@dp.callback_query(lambda c: c.data and c.data.startswith("t5_retry:"))
 @dp.callback_query(lambda c: c.data and (c.data.startswith("th_retry:") or c.data.startswith("t5_retry:")))
-async def on_theory_retry_click(callback: CallbackQuery):
+async def on_theory_retry_callback(callback: CallbackQuery):
     try:
         parts = callback.data.split(":")
         if parts[0] == "t5_retry":
@@ -1997,20 +1983,8 @@ async def on_theory_retry_click(callback: CallbackQuery):
         await callback.answer()
         await execute_theory_round(callback.bot, chat_id, user_id, target_number, bet, callback.message.message_id)
     except Exception as e:
-        logger.error(f"Ошибка в реванше теории: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка при повторе броска.", show_alert=True)
-
-# Хэндлер нажатия на инлайн-кнопку реванша
-@dp.callback_query(lambda c: c.data and c.data.startswith("t5_retry:"))
-async def on_theory5_retry_callback(callback: CallbackQuery):
-    try:
-        parts = callback.data.split(":")
-        bet = int(parts[1])
-        user_id = callback.from_user.id
-        chat_id = callback.message.chat.id
-
-        await callback.answer()  # Подтверждаем клик в Telegram, чтобы не висели часики
-        await run_theory5_round(callback.bot, chat_id, user_id, bet, callback.message.message_id)
+        logger.error(f"Ошибка в реванше: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка при повторе", show_alert=True)
     except Exception as e:
         logger.error(f"Ошибка в реванше теории 5: {e}", exc_info=True)
         await callback.answer("❌ Не удалось запустить повторный бросок.", show_alert=True)
@@ -4876,9 +4850,11 @@ async def handle_all_text_commands(message: Message):
     if first_word in ["duel", "дуэль", "вызов"]:
         return await process_duel_cmd(message, args)
     # Режим "Теория 5"
-    # 1. Быстрые команды т1, т2, т3, т4, т5, т6 (например, "т1 5000", "т6 100к", "т5 все")
+# Проверка теорий 1-6
+    for n in range(1, 7):
+        if first_word == f"т{n}":
+            return await parse_and_start_theory(message, n, args)
 
-    # 2. Полные команды "теория 1" ... "теория 6" (например, "теория 3 200кк", "теор 5 100")
     if first_word in ["теория", "теор"] and len(words) >= 2:
         num_str = words[1].strip()
         if num_str.isdigit() and 1 <= int(num_str) <= 6:
