@@ -1499,19 +1499,8 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
         "draw": "⚖️ <b>НИЧЬЯ!</b>\n\n"
     }
 
-    quote_text = ""
-    if user_id is not None:
-        try:
-            if result_type == "win":
-                user_loss_streaks[user_id] = 0
-            elif result_type == "loss":
-                user_loss_streaks[user_id] = user_loss_streaks.get(user_id, 0) + 1
-                if user_loss_streaks[user_id] >= 3:
-                    quote_text = f"\n\n💬 <b>Слова поддержки:</b>\n{random.choice(FUNNY_SUPPORT_QUOTES)}"
-        except Exception:
-            pass
-
-    full_caption = banners.get(result_type, "") + caption + quote_text
+    # Собираем только баннер и основной текст (без случайных фраз поддержки)
+    full_caption = banners.get(result_type, "") + caption
     final_markup = reply_markup
     if not final_markup and game_type and bet and user_id:
         final_markup = replay_keyboard(game_type, bet, user_id)
@@ -1529,8 +1518,8 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
                 reply_markup=final_markup
             )
             return
-        except Exception as img_err:
-            logger.warning(f"Не удалось загрузить фото ({img_err}), отправляем текстом.")
+        except Exception:
+            pass
 
     await safe_reply(message, full_caption, reply_markup=final_markup)
 
@@ -2978,77 +2967,74 @@ async def process_clan_deposit(message: Message, args: List[str]):
 
 # ================= БИЗНЕСЫ (12 ЧАСОВ, ВЫСОКАЯ СТОИМОСТЬ) =================
 # ======================== БИЗНЕСЫ (ОКУПАЕМОСТЬ 5 ДНЕЙ) ========================
+# ======================== БИЗНЕСЫ (ОКУПАЕМОСТЬ ±7 ДНЕЙ) ========================
 from datetime import datetime, timezone
 
-BUSINESS_CATALOG = {
+BUSINESS_CATALOG: Dict[str, Dict[str, Any]] = {
     "vending": {
         "name": "Сеть вендинговых аппаратов",
-        "cost": 1_500_000,
-        "income_per_hour": 12_500,
+        "cost": 5_000_000,
+        "income_per_hour": 25_000,
         "icon": "☕"
     },
     "kiosk": {
         "name": "Круглосуточный павильон",
-        "cost": 5_000_000,
-        "income_per_hour": 41_666,
+        "cost": 25_000_000,
+        "income_per_hour": 125_000,
         "icon": "🏪"
     },
     "pc_club": {
         "name": "Киберспортивная арена",
-        "cost": 18_000_000,
-        "income_per_hour": 150_000,
+        "cost": 50_000_000,
+        "income_per_hour": 275_000,
         "icon": "🖥"
     },
     "car_wash": {
         "name": "Роботизированная автомойка",
-        "cost": 50_000_000,
-        "income_per_hour": 416_666,
+        "cost": 100_000_000,
+        "income_per_hour": 500_000,
         "icon": "🚿"
     },
     "logistics": {
         "name": "Логистический терминал",
-        "cost": 140_000_000,
-        "income_per_hour": 1_166_666,
+        "cost": 150_000_000,
+        "income_per_hour": 800_000,
         "icon": "🚛"
     },
     "crypto_farm": {
         "name": "ASIC Дата-центр",
         "cost": 350_000_000,
-        "income_per_hour": 2_916_666,
+        "income_per_hour": 2_000_000,
         "icon": "⛏"
     },
     "factory": {
         "name": "Нефтеперерабатывающий завод",
-        "cost": 900_000_000,
-        "income_per_hour": 7_500_000,
+        "cost": 1_000_000_000,
+        "income_per_hour": 5_000_000,
         "icon": "🏭"
     },
     "casino": {
         "name": "Неоновое казино в Вегасе",
         "cost": 2_500_000_000,
-        "income_per_hour": 20_833_333,
+        "income_per_hour": 12_500_000,
         "icon": "🎰"
     },
     "bank": {
         "name": "Транснациональный банк",
-        "cost": 7_000_000_000,
-        "income_per_hour": 58_333_333,
+        "cost": 10_000_000_000,
+        "income_per_hour": 100_000_000,
         "icon": "🏦"
-    },
-    "spaceport": {
-        "name": "Орбитальный космодром",
-        "cost": 20_000_000_000,
-        "income_per_hour": 166_666_666,
-        "icon": "🚀"
     }
 }
 
+
 async def process_businesses_catalog(message: Message):
+    """Вывод обновленного каталога бизнесов с окупаемостью ±7 дней"""
     text = (
         "🏢 <b>РЫНОК БИЗНЕСОВ</b> 🏢\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Купленные предприятия приносят пассивный доход!</i>\n"
-        "<i>Окупаемость: 5 дней. Сбор прибыли: каждые 6 часов.</i>\n\n"
+        "Купленные предприятия приносят пассивный доход!\n"
+        "Окупаемость: ±7 дней. Сбор прибыли: каждые 6 часов.\n\n"
     )
     for key, b in BUSINESS_CATALOG.items():
         text += (
@@ -3059,7 +3045,7 @@ async def process_businesses_catalog(message: Message):
         )
     text += (
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🛒 <b>Покупка:</b> <code>купить бизнес [код]</code>\n"
+        "🛒 <b>Покупка:</b> <code>купить бизнес [код]</code>\n\n"
         "📥 <b>Сбор прибыли:</b> <code>прибыль</code>"
     )
     await safe_reply(message, text)
@@ -3077,7 +3063,7 @@ async def process_buy_business(message: Message, args: List[str]):
                 message,
                 "❌ <b>Укажите код предприятия!</b>\n"
                 "Пример: <code>купить бизнес vending</code>\n"
-                "Список доступных бизнесов: <code>бизнесы</code>"
+                "Посмотреть список: <code>бизнесы</code>"
             )
 
         b_key = args[-1].lower().strip()
@@ -3086,7 +3072,7 @@ async def process_buy_business(message: Message, args: List[str]):
             return await safe_reply(
                 message,
                 f"❌ Бизнес с кодом <code>{b_key}</code> не найден!\n"
-                f"Посмотрите коды предприятий в команде: <code>бизнесы</code>"
+                f"Ознакомьтесь с кодами предприятий: <code>бизнесы</code>"
             )
 
         biz = BUSINESS_CATALOG[b_key]
@@ -3095,13 +3081,13 @@ async def process_buy_business(message: Message, args: List[str]):
         if user_bal < cost:
             return await safe_reply(
                 message,
-                f"❌ Недостаточно средств для покупки!\n"
+                f"❌ <b>Недостаточно средств для покупки!</b>\n"
                 f"💵 Стоимость: <b>{fmt_num(cost)} 💰</b>\n"
                 f"💰 Ваш баланс: <code>{fmt_num(user_bal)} 💰</code>"
             )
 
         if not await db.deduct_bet_atomic(user_id, cost):
-            return await safe_reply(message, "❌ Не удалось списать монеты. Проверьте баланс!")
+            return await safe_reply(message, "❌ Не удалось списать монеты. Попробуйте снова.")
 
         async with db.pool.acquire() as conn:
             await conn.execute("""
@@ -3145,8 +3131,8 @@ async def process_collect_business_income(message: Message):
                 )
 
             now = datetime.now(timezone.utc)
-            MIN_COLLECT_SECONDS = 6 * 3600
-            MAX_ACCUMULATE_SECONDS = 48 * 3600
+            MIN_COLLECT_SECONDS = 6 * 3600       # Сбор раз в 6 часов
+            MAX_ACCUMULATE_SECONDS = 48 * 3600   # Копится максимум до 48 часов
 
             total_income = 0
             collected_lines = []
