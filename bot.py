@@ -1507,7 +1507,7 @@ async def send_game_result(message: Message, result_type: str, caption: str, use
             elif result_type == "loss":
                 user_loss_streaks[user_id] = user_loss_streaks.get(user_id, 0) + 1
                 if user_loss_streaks[user_id] >= 3:
-                    quote_text = f"\n\n💬 <b>Слова поддержки:</b>\n{random.choice(MOTIVATIONAL_QUOTES)}"
+                    quote_text = f"\n\n💬 <b>Слова поддержки:</b>\n{random.choice(FUNNY_SUPPORT_QUOTES)}"
         except Exception:
             pass
 
@@ -2821,7 +2821,7 @@ async def cb_quick_replay(call: CallbackQuery):
     elif game_type == "slots":
         await run_slots_game(call.message, user_id, display_name, actual_bet)
     elif game_type == "death":
-        await run_death_roulette_game(call.message, user_id, display_name, actual_bet)
+        await safe_reply(call.message, "Рулетка запускается через команду: <code>рулетка [исход] [ставка]</code>")
     elif game_type in ["over", "under", "even", "odd"]:
         await run_simple_bet_game(call.message, user_id, display_name, actual_bet, game_type)
         # ================= КЛАНОВАЯ СИСТЕМА =================
@@ -4402,7 +4402,63 @@ async def force_quiz_cmd(message: Message):
 
     if message.chat.type not in ["group", "supergroup"]:
         return await safe_reply(message, "❌ Викторину можно запускать только в беседах/группах!")
+async def process_pay_cmd(message: Message, args: List[str]):
+    sender_id = message.from_user.id
+    await db.register_user(sender_id, message.from_user.full_name, message.from_user.username)
+    sender = await db.get_user(sender_id)
+    sender_bal = sender["balance"] if sender else 0
 
+    target_id, target_name = None, None
+    amount_raw = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if target.is_bot:
+            return await safe_reply(message, "❌ Нельзя переводить ботам!")
+        target_id = target.id
+        t_data = await db.get_user(target.id)
+        target_name = (t_data.get("custom_nick") or target.full_name) if t_data else target.full_name
+        amount_raw = args[0] if args else None
+    else:
+        if len(args) < 2:
+            return await safe_reply(message, "❌ Формат: <code>перевод [сумма] @username</code>")
+        for arg in args:
+            if not target_id and (arg.startswith("@") or (arg.isdigit() and len(arg) > 6)):
+                clean_tag = arg.replace("@", "")
+                t_id = int(arg) if arg.isdigit() else await db.get_user_id_by_username(clean_tag)
+                if t_id:
+                    target_id = t_id
+                    u_data = await db.get_user(t_id)
+                    target_name = (u_data.get("custom_nick") or u_data.get("username")) if u_data else f"@{clean_tag}"
+            elif not amount_raw and parse_amount_string(arg, 0) is not None:
+                amount_raw = arg
+
+    if not target_id:
+        return await safe_reply(message, "❌ Укажите игрока через @username или ответом!")
+    if target_id == sender_id:
+        return await safe_reply(message, "❌ Нельзя переводить самому себе!")
+
+    amount = parse_amount_string(amount_raw, sender_bal)
+    if amount is None or amount < 100:
+        return await safe_reply(message, "❌ Минимальная сумма перевода: 100 💰!")
+    if sender_bal < amount:
+        return await safe_reply(message, f"❌ Недостаточно монет! Баланс: {fmt_num(sender_bal)} 💰")
+
+    fee = int(round(amount * 0.05))
+    received = amount - fee
+
+    if not await db.transfer_money_transaction(sender_id, target_id, amount, received):
+        return await safe_reply(message, "❌ Ошибка списания баланса.")
+
+    s_name = sender.get("custom_nick") or message.from_user.full_name
+    await safe_reply(
+        message,
+        f"💸 <b>ПЕРЕВОД ВЫПОЛНЕН!</b>\n"
+        f"👤 От: {get_mention(sender_id, s_name)}\n"
+        f"📥 Кому: {get_mention(target_id, target_name)}\n"
+        f"💵 Сумма: <b>{fmt_num(amount)} 💰</b> (Комиссия 5%: <code>{fmt_num(fee)} 💰</code>)\n"
+        f"💰 Зачислено: <b>+{fmt_num(received)} 💰</b>"
+    )
     await launch_new_quiz(message.chat.id, forced_by_admin=True)
 # ================= ГЛОБАЛЬНЫЙ РОУТЕР СООБЩЕНИЙ ================
 @dp.message()
@@ -4791,7 +4847,7 @@ async def handle_all_text_commands(message: Message):
 
     # Чеки
     if first_word in ["check", "чек", "чеки"]:
-        return await process_create_check_cmd(message, args)
+        return await process_create_check_command(message, args)
 
     # Дуэли
     if first_word in ["duel", "дуэль", "вызов"]:
@@ -5088,7 +5144,7 @@ async def health_check(request):
 async def main():
     # 1. ОБЯЗАТЕЛЬНО: Подключаем базу данных перед опросом Telegram!
     logger.info("Подключение к PostgreSQL...")
-    await db.init_db()  # или то имя функции, которое создаёт db.pool в твоём классе Database
+    await db.init() # или то имя функции, которое создаёт db.pool в твоём классе Database
 
     # 2. Сброс старых вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
