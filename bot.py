@@ -1822,41 +1822,48 @@ async def run_dice_game(message: Message, user_id: int, user_name: str, bet: int
         )
     finally:
         active_game_locks.pop(user_id, None)
-import asyncio
 
-import asyncio
-import time
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.exceptions import TelegramRetryAfter
 
-# Словарь для защиты от спама: {user_id: timestamp_последней_игры}
-theory5_cooldowns = {}
-THEORY5_COOLDOWN_SECONDS = 4  # Задержка между играми
 
-def get_theory5_retry_kb(bet: int) -> InlineKeyboardMarkup:
-    """Генерирует инлайн-кнопку для быстрого повтора ставки"""
+
+# Защита от флуда и спама костями
+theory_cooldowns: Dict[int, float] = {}
+THEORY_COOLDOWN_SECONDS: int = 4
+
+def get_theory_retry_kb(target_number: int, bet: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"🔁 Повторить ({fmt_num(bet)} 💰)",
-                    callback_data=f"t5_retry:{bet}"
+                    text=f"🔁 Повторить Т{target_number} ({fmt_num(bet)} 💰)",
+                    callback_data=f"th_retry:{target_number}:{bet}"
                 )
             ]
         ]
     )
 
-async def run_theory5_round(bot_instance, chat_id: int, user_id: int, bet: int, reply_to_msg_id: int = None):
-    """Ядро игры: списание, бросок 3 кубиков, расчёт x54 и вывод с кнопкой"""
-    # 1. Антиспам проверка
+async def safe_send_dice(bot_obj: Bot, chat_id: int):
+    """Отправка костей с автоматическим ожиданием при Flood Control"""
+    for _ in range(4):
+        try:
+            return await bot_obj.send_dice(chat_id, emoji="🎲")
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 0.6)
+        except Exception:
+            await asyncio.sleep(1)
+    return await bot_obj.send_dice(chat_id, emoji="🎲")
+
+async def execute_theory_round(bot_obj: Bot, chat_id: int, user_id: int, target_number: int, bet: int, reply_to_id: int = None):
+    # 1. Антиспам-кулдаун
     now = time.time()
-    last_time = theory5_cooldowns.get(user_id, 0)
-    if now - last_time < THEORY5_COOLDOWN_SECONDS:
-        rem = round(THEORY5_COOLDOWN_SECONDS - (now - last_time), 1)
-        return await bot_instance.send_message(
+    last_act = theory_cooldowns.get(user_id, 0)
+    if now - last_act < THEORY_COOLDOWN_SECONDS:
+        rem = round(THEORY_COOLDOWN_SECONDS - (now - last_act), 1)
+        return await bot_obj.send_message(
             chat_id,
-            f"⏳ <b>Не так быстро!</b> Подождите ещё <code>{rem} сек.</code> перед следующим броском.",
-            reply_to_message_id=reply_to_msg_id
+            f"⏳ <b>Не так быстро!</b> Подождите <code>{rem} сек.</code> перед следующим броском.",
+            parse_mode="HTML",
+            reply_to_message_id=reply_to_id
         )
 
     # 2. Проверка баланса
@@ -1864,112 +1871,133 @@ async def run_theory5_round(bot_instance, chat_id: int, user_id: int, bet: int, 
     balance = user["balance"] if user else 0
 
     if bet <= 0:
-        return await bot_instance.send_message(chat_id, "❌ Ставка должна быть больше 0!", reply_to_message_id=reply_to_msg_id)
+        return await bot_obj.send_message(
+            chat_id, 
+            "❌ Ставка должна быть больше 0!", 
+            parse_mode="HTML", 
+            reply_to_message_id=reply_to_id
+        )
 
     if balance < bet:
-        return await bot_instance.send_message(
+        return await bot_obj.send_message(
             chat_id,
             f"❌ <b>Недостаточно средств!</b>\n"
             f"💵 Требуется: <code>{fmt_num(bet)} 💰</code>\n"
             f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>",
-            reply_to_message_id=reply_to_msg_id
+            parse_mode="HTML",
+            reply_to_message_id=reply_to_id
         )
 
-    # 3. Атомарное списание
+    # 3. Атомарное списание ставки
     if not await db.deduct_bet_atomic(user_id, bet):
-        return await bot_instance.send_message(chat_id, "❌ Ошибка списания средств. Попробуйте снова.", reply_to_message_id=reply_to_msg_id)
+        return await bot_obj.send_message(
+            chat_id, 
+            "❌ Ошибка списания баланса. Попробуйте снова.", 
+            parse_mode="HTML", 
+            reply_to_message_id=reply_to_id
+        )
 
-    # Обновляем таймер антиспама
-    theory5_cooldowns[user_id] = time.time()
-
-    display_name = user.get("custom_nick") or "Игрок"
+    theory_cooldowns[user_id] = time.time()
+    display_name = user.get("custom_nick") or user.get("username") or "Игрок"
     mention = get_mention(user_id, display_name)
 
-    # 4. Бросок 3 кубиков с защитой от Telegram Flood Limit
-    try:
-        d1 = await bot_instance.send_dice(chat_id, emoji="🎲")
-        await asyncio.sleep(0.3)
-        d2 = await bot_instance.send_dice(chat_id, emoji="🎲")
-        await asyncio.sleep(0.3)
-        d3 = await bot_instance.send_dice(chat_id, emoji="🎲")
-    except TelegramRetryAfter as e:
-        # Если Telegram всё же ограничил частоту запросов
-        await asyncio.sleep(e.retry_after)
-        d1 = await bot_instance.send_dice(chat_id, emoji="🎲")
-        d2 = await bot_instance.send_dice(chat_id, emoji="🎲")
-        d3 = await bot_instance.send_dice(chat_id, emoji="🎲")
+    # 4. Отправка 3 кубиков с интервалами против лимитов Telegram
+    d1 = await safe_send_dice(bot_obj, chat_id)
+    await asyncio.sleep(0.4)
+    d2 = await safe_send_dice(bot_obj, chat_id)
+    await asyncio.sleep(0.4)
+    d3 = await safe_send_dice(bot_obj, chat_id)
 
-    # Ждём завершения анимации вращения костей
-    await asyncio.sleep(3.2)
+    # Ожидание окончания физической анимации костей
+    await asyncio.sleep(3.3)
 
-    val1 = d1.dice.value
-    val2 = d2.dice.value
-    val3 = d3.dice.value
+    v1, v2, v3 = int(d1.dice.value), int(d2.dice.value), int(d3.dice.value)
+    retry_kb = get_theory_retry_kb(target_number, bet)
 
-    retry_kb = get_theory5_retry_kb(bet)
-
-    # 5. Проверка победы (5-5-5) с множителем x54
-    if val1 == 5 and val2 == 5 and val3 == 5:
+    # 5. Проверка совпадения трёх костей (x54)
+    if v1 == target_number and v2 == target_number and v3 == target_number:
         win_amount = bet * 54
         await db.change_balance(user_id, win_amount)
         new_bal = balance - bet + win_amount
 
-        win_text = (
-            f"⚡ <b>ТЕОРИЯ 5 ВЫБИЛА ДЖЕКПОТ x54!</b> ⚡\n"
+        res_text = (
+            f"⚡ <b>ТЕОРИЯ {target_number}: ДЖЕКПОТ x54!</b> ⚡\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 Игрок: {mention}\n"
-            f"🎲 Выпало: [ <b>5</b> | <b>5</b> | <b>5</b> ] 🔥🔥🔥\n"
+            f"🎯 Цель: [ <b>{target_number}</b> ]\n"
+            f"🎲 Выпало: [ <b>{target_number}</b> | <b>{target_number}</b> | <b>{target_number}</b> ] 🔥🔥🔥\n"
             f"💵 Ставка: <code>{fmt_num(bet)} 💰</code>\n"
             f"🏆 <b>Выигрыш: +{fmt_num(win_amount)} 💰 (x54)</b>\n"
             f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
-        await bot_instance.send_message(chat_id, win_text, reply_markup=retry_kb, reply_to_message_id=reply_to_msg_id)
     else:
         new_bal = balance - bet
-        lose_text = (
-            f"🎲 <b>ТЕОРИЯ 5: МИМО</b>\n"
+        res_text = (
+            f"🎲 <b>ТЕОРИЯ {target_number}: МИМО</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 Игрок: {mention}\n"
-            f"🎲 Выпало: [ <b>{val1}</b> | <b>{val2}</b> | <b>{val3}</b> ]\n"
+            f"🎯 Цель: [ <b>{target_number}</b> ]\n"
+            f"🎲 Выпало: [ <b>{v1}</b> | <b>{v2}</b> | <b>{v3}</b> ]\n"
             f"💵 Проигрыш: <code>-{fmt_num(bet)} 💰</code>\n"
             f"💰 Баланс: <code>{fmt_num(new_bal)} 💰</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Выигрыш x54 даётся только при комбинации 5-5-5.</i>"
+            f"<i>Выигрыш x54 даётся только при комбинации {target_number}-{target_number}-{target_number}.</i>"
         )
-        await bot_instance.send_message(chat_id, lose_text, reply_markup=retry_kb, reply_to_message_id=reply_to_msg_id)
 
+    # Обязательно указываем parse_mode=ParseMode.HTML
+    await bot_obj.send_message(
+        chat_id=chat_id,
+        text=res_text,
+        parse_mode="HTML",
+        reply_markup=retry_kb,
+        reply_to_message_id=reply_to_id
+    )
 
-async def process_theory_five_game(message: Message, args: List[str]):
-    """Хэндлер вызова из чата"""
+async def parse_and_start_theory(message: Message, target_number: int, raw_args: List[str]):
     user_id = message.from_user.id
     chat_id = message.chat.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=chat_id)
 
-    if not args:
-        return await safe_reply(
-            message,
-            "🎲 <b>РЕЖИМ: ТЕОРИЯ 5 (x54)</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Бросается 3 кубика. При выпадении <b>5-5-5</b> ставка умножается на <b>x54</b>!\n\n"
-            "Использование: <code>т5 [ставка]</code> или <code>теория 5 [ставка]</code>\n"
-            "Пример: <code>т5 50000</code> или <code>т5 все</code>"
-        )
-
     user = await db.get_user(user_id)
     balance = user["balance"] if user else 0
 
-    bet_raw = args[0].lower().replace("к", "000").replace("k", "000")
-    if bet_raw in ["все", "всё", "all"]:
-        bet = balance
-    else:
-        try:
-            bet = int(bet_raw)
-        except ValueError:
-            return await safe_reply(message, "❌ Некорректная сумма ставки!")
+    if not raw_args:
+        return await safe_reply(
+            message,
+            f"🎲 <b>РЕЖИМ: ТЕОРИЯ {target_number} (x54)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Бросается 3 кубика. Если на всех трёх выпадает <b>{target_number}</b> — выигрыш <b>x54</b>!\n\n"
+            f"Использование: <code>т{target_number} [ставка]</code> или <code>теория {target_number} [ставка]</code>\n"
+            f"Пример: <code>т{target_number} 50к</code> или <code>т{target_number} все</code>"
+        )
 
-    await run_theory5_round(message.bot, chat_id, user_id, bet, message.message_id)
+    bet = parse_amount_string(raw_args[0], balance)
+    if bet is None or bet <= 0:
+        return await safe_reply(message, "❌ Некорректная сумма ставки!")
 
+    await execute_theory_round(message.bot, chat_id, user_id, target_number, bet, message.message_id)
+
+# Коллбэк для кнопки «🔁 Повторить»
+@dp.callback_query(lambda c: c.data and (c.data.startswith("th_retry:") or c.data.startswith("t5_retry:")))
+async def on_theory_retry_click(callback: CallbackQuery):
+    try:
+        parts = callback.data.split(":")
+        if parts[0] == "t5_retry":
+            target_number = 5
+            bet = int(parts[1])
+        else:
+            target_number = int(parts[1])
+            bet = int(parts[2])
+
+        user_id = callback.from_user.id
+        chat_id = callback.message.chat.id
+
+        await callback.answer()
+        await execute_theory_round(callback.bot, chat_id, user_id, target_number, bet, callback.message.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка в реванше теории: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка при повторе броска.", show_alert=True)
 
 # Хэндлер нажатия на инлайн-кнопку реванша
 @dp.callback_query(lambda c: c.data and c.data.startswith("t5_retry:"))
@@ -4562,10 +4590,18 @@ async def handle_all_text_commands(message: Message):
     # Сбор прибыли
     if full_lower in ["прибыль", "доход", "собрать", "сбор"]:
         return await process_collect_business_income(message)
-    if full_lower.startswith("теория 5") or full_lower.startswith("т5"):
-        # Отрезаем слова команды, чтобы получить сумму ставки
-        cmd_args = [w for w in words[1:] if w.lower() not in ["5", "пять"]]
-        return await process_theory_five_game(message, cmd_args)
+    # 1. Быстрые команды т1, т2, т3, т4, т5, т6 (например, "т1 5000", "т6 100к", "т5 все")
+    for n in range(1, 7):
+        if first_word == f"т{n}":
+            return await parse_and_start_theory(message, n, args)
+
+    # 2. Полные команды "теория 1" ... "теория 6" (например, "теория 3 200кк", "теор 5 100")
+    if first_word in ["теория", "теор"] and len(words) >= 2:
+        num_str = words[1].strip()
+        if num_str.isdigit() and 1 <= int(num_str) <= 6:
+            target_n = int(num_str)
+            bet_args = words[2:]
+            return await parse_and_start_theory(message, target_n, bet_args)
     # Покупка бизнеса (ловит как "купить бизнес vending", так и "купить vending")
     if full_lower.startswith("купить бизнес") or full_lower.startswith("купить"):
         # Отрезаем ключевые слова
@@ -4853,10 +4889,18 @@ async def handle_all_text_commands(message: Message):
     if first_word in ["duel", "дуэль", "вызов"]:
         return await process_duel_cmd(message, args)
     # Режим "Теория 5"
-    if full_lower.startswith("теория 5") or full_lower.startswith("т5"):
-        # Если ввели "теория 5 1000", отсекаем вводные слова и берем ставку
-        game_args = [w for w in words[1:] if w.lower() not in ["5", "пять"]]
-        return await process_theory_five_game(message, game_args)
+    # 1. Быстрые команды т1, т2, т3, т4, т5, т6 (например, "т1 5000", "т6 100к", "т5 все")
+    for n in range(1, 7):
+        if first_word == f"т{n}":
+            return await parse_and_start_theory(message, n, args)
+
+    # 2. Полные команды "теория 1" ... "теория 6" (например, "теория 3 200кк", "теор 5 100")
+    if first_word in ["теория", "теор"] and len(words) >= 2:
+        num_str = words[1].strip()
+        if num_str.isdigit() and 1 <= int(num_str) <= 6:
+            target_n = int(num_str)
+            bet_args = words[2:]
+            return await parse_and_start_theory(message, target_n, bet_args)
     # Реф
     if first_word in ["ref", "реф", "партнерка"]:
         me = await bot.get_me()
