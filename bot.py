@@ -4891,9 +4891,6 @@ async def handle_all_text_commands(message: Message):
         return await process_duel_cmd(message, args)
     # Режим "Теория 5"
     # 1. Быстрые команды т1, т2, т3, т4, т5, т6 (например, "т1 5000", "т6 100к", "т5 все")
-    for n in range(1, 7):
-        if first_word == f"т{n}":
-            return await parse_and_start_theory(message, n, args)
 
     # 2. Полные команды "теория 1" ... "теория 6" (например, "теория 3 200кк", "теор 5 100")
     if first_word in ["теория", "теор"] and len(words) >= 2:
