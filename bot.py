@@ -5084,15 +5084,11 @@ async def db_cleanup_background_worker():
 async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
 
-
 async def main():
-    # Keep-alive сервер для Render
-    start_keep_alive()
-
-    # Очищаем вебхуки перед стартом polling
+    # 1. Очищаем вебхуки перед стартом polling
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # Бесконечный цикл поддержания жизни
+    # 2. Бесконечный цикл опроса
     while True:
         try:
             logger.info("Запуск polling aiogram...")
@@ -5103,6 +5099,9 @@ async def main():
         except Exception as e:
             logger.error(f"Критический сбой polling: {e}. Перезапуск через 5 секунд...", exc_info=True)
             await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 if __name__ == "__main__":
     asyncio.run(main())
