@@ -4602,19 +4602,7 @@ async def handle_all_text_commands(message: Message):
     # Сбор прибыли
     if full_lower in ["прибыль", "доход", "собрать", "сбор"]:
         return await process_collect_business_income(message)
-    # 1. Быстрые команды т1, т2, т3, т4, т5, т6 (например, "т1 5000", "т6 100к", "т5 все")
-    # 1. Быстрые команды: т1, т2, т3, т4, т5, т6 (например, "т2 100", "т3 50к")
-    for n in range(1, 7):
-        if first_word == f"т{n}":
-            return await parse_and_start_theory(message, n, args)
 
-    # 2. Полные команды: "теория 1" ... "теория 6" (например, "теория 4 1000", "теор 2 все")
-    if first_word in ["теория", "теор"] and len(words) >= 2:
-        num_str = words[1].strip()
-        if num_str.isdigit() and 1 <= int(num_str) <= 6:
-            target_n = int(num_str)
-            bet_args = words[2:]
-            return await parse_and_start_theory(message, target_n, bet_args)
     # Покупка бизнеса (ловит как "купить бизнес vending", так и "купить vending")
     if full_lower.startswith("купить бизнес") or full_lower.startswith("купить"):
         # Отрезаем ключевые слова
