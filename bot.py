@@ -5084,24 +5084,25 @@ async def db_cleanup_background_worker():
 async def health_check(request):
     return web.Response(text="Duel Cubes Bot is Live! 🎲", status=200)
 
+
 async def main():
-    # 1. Очищаем вебхуки перед стартом polling
+    # 1. ОБЯЗАТЕЛЬНО: Подключаем базу данных перед опросом Telegram!
+    logger.info("Подключение к PostgreSQL...")
+    await db.init_db()  # или то имя функции, которое создаёт db.pool в твоём классе Database
+
+    # 2. Сброс старых вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # 2. Бесконечный цикл опроса
+    # 3. Бесконечный цикл опроса
     while True:
         try:
             logger.info("Запуск polling aiogram...")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         except (KeyboardInterrupt, SystemExit):
-            logger.info("Остановка бота вручную.")
             break
         except Exception as e:
-            logger.error(f"Критический сбой polling: {e}. Перезапуск через 5 секунд...", exc_info=True)
+            logger.error(f"Сбой polling: {e}. Перезапуск через 5 сек...", exc_info=True)
             await asyncio.sleep(5)
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 if __name__ == "__main__":
     asyncio.run(main())
