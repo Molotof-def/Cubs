@@ -3052,6 +3052,21 @@ async def process_buy_business(message: Message, args: List[str]):
         biz = BUSINESS_CATALOG[b_key]
         cost = biz["cost"]
 
+        # ПРОВЕРКА: куплен ли уже этот бизнес игроком
+        async with db.pool.acquire() as conn:
+            already_owned = await conn.fetchval("""
+                SELECT 1 FROM user_businesses 
+                WHERE user_id = $1 AND business_key = $2
+            """, user_id, b_key)
+
+        if already_owned:
+            return await safe_reply(
+                message,
+                f"❌ <b>У вас уже есть это предприятие!</b>\n"
+                f"{biz['icon']} <b>{biz['name']}</b> уже числится в вашей собственности.\n"
+                f"💡 <i>Каждый тип бизнеса можно приобрести строго в единственном экземпляре!</i>"
+            )
+
         if user_bal < cost:
             return await safe_reply(
                 message,
@@ -3082,7 +3097,6 @@ async def process_buy_business(message: Message, args: List[str]):
     except Exception as e:
         logger.error(f"Ошибка при покупке бизнеса: {e}", exc_info=True)
         await safe_reply(message, f"❌ Ошибка при покупке: <code>{e}</code>")
-
 
 async def process_collect_business_income(message: Message):
     user_id = message.from_user.id
@@ -4541,9 +4555,10 @@ async def handle_all_text_commands(message: Message):
         return await process_start_cmd(message)
 
     # Профиль
-    if first_word in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
-        return await process_profile_cmd(message, args)
-
+    # Профиль: строго по одиночному слову "я", либо стандартным командам
+    if full_lower == "я" or first_word in ["profile", "профиль", "баланс", "balance", "stats", "стата"]:
+        cmd_args = [] if full_lower == "я" else args
+        return await process_profile_cmd(message, cmd_args)
     # Вайп
     if first_word in ["wipe", "вайп", "обнулить"]:
         return await process_wipe_cmd(message, args)
