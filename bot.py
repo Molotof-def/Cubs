@@ -3397,88 +3397,84 @@ async def process_divorce(message: Message):
     await safe_reply(message, text)
 
 # ================= ПЕРЕВОДЫ И ЧЕКИ =================
-import uuid
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
 
 # Хранилище чеков (или таблица в БД, если используешь PostgreSQL)
 # Структура: {check_id: {"creator_id": int, "creator_name": str, "amount_per_user": int, "total_activations": int, "claimed_users": set()}}
 active_checks = {}
-
-def get_check_kb(check_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🎁 Забрать чек",
-                    callback_data=f"claim_check:{check_id}"
-                )
-            ]
-        ]
+def get_check_kb(check_id: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🎁 Забрать чек",
+        callback_data=f"claim_check:{check_id}"
     )
-
+    return builder.as_markup()
 async def process_create_check_command(message: Message, args: List[str]):
-    """
-    Создание чека:
-    чек [сумма_на_человека] [кол-во_человек]
-    Пример: чек 10000 5
-    Пример: чек 50000 1000000 (до бесконечности)
-    """
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # 1. Регистрация и получение точного баланса именно автора сообщения
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username, chat_id=chat_id)
+    user = await db.get_user(user_id)
+    balance = int(user["balance"]) if user else 0
 
     if len(args) < 2:
-        return await message.answer(
+        return await safe_reply(
+            message,
             "🎁 <b>СОЗДАНИЕ ЧЕКА</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "Формат: <code>чек [сумма] [кол-во человек]</code>\n\n"
-            "• Количество человек: <b>от 1 до бесконечности</b>\n"
-            "• Пример: <code>чек 50000 1</code> (для одного)\n"
-            "• Пример: <code>чек 10000 500</code> (для 500 человек)\n"
+            "• Пример: <code>чек 50к 5</code> (по 50 000 💰 на 5 человек)\n"
+            "• Пример: <code>чек 1кк 1</code> (1 000 000 💰 для одного)\n"
+            f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
 
-    # 1. Парсинг суммы на человека
-    amount_raw = args[0].lower().replace("к", "000").replace("k", "000")
-    try:
-        amount_per_user = int(amount_raw)
-    except ValueError:
-        return await message.answer("❌ Некорректная сумма в чеке!")
+    # Умный парсинг аргументов (если игрок написал наоборот: "чек 5 50к")
+    arg1_amount = parse_amount_string(args[0], balance)
+    arg2_amount = parse_amount_string(args[1], balance)
 
-    if amount_per_user <= 0:
-        return await message.answer("❌ Сумма чека должна быть больше 0!")
+    amount_per_user = None
+    activations_count = None
 
-    # 2. Парсинг количества активаций (от 1 до бесконечности)
-    count_raw = args[1].lower().replace("к", "000").replace("k", "000")
-    try:
-        activations_count = int(count_raw)
-    except ValueError:
-        return await message.answer("❌ Некорректное количество человек!")
+    # Если во втором аргументе есть буквы (к, кк, m) или он явно больше первого
+    if any(c in args[1].lower() for c in ["к", "k", "m", "м"]) and args[0].isdigit() and int(args[0]) <= 1000:
+        # Игрок написал: чек [кол-во] [сумма] (например: чек 10 68к)
+        activations_count = int(args[0])
+        amount_per_user = arg2_amount
+    else:
+        # Стандарт: чек [сумма] [кол-во] (например: чек 68к 10)
+        amount_per_user = arg1_amount
+        try:
+            activations_count = int(args[1].replace("к", "000").replace("k", "000"))
+        except ValueError:
+            activations_count = None
 
-    if activations_count < 1:
-        return await message.answer("❌ Количество человек должно быть минимум 1!")
+    if amount_per_user is None or amount_per_user <= 0:
+        return await safe_reply(message, "❌ Некорректная сумма в чеке!")
 
-    # 3. Расчет общей суммы списания
+    if activations_count is None or activations_count < 1:
+        return await safe_reply(message, "❌ Количество человек должно быть от 1 и больше!")
+
+    # Расчет общей стоимости
     total_cost = amount_per_user * activations_count
 
-    user = await db.get_user(user_id)
-    balance = user["balance"] if user else 0
-
     if balance < total_cost:
-        return await message.answer(
+        return await safe_reply(
+            message,
             f"❌ <b>Недостаточно средств для создания чека!</b>\n"
-            f"💵 Требуется всего: <code>{fmt_num(total_cost)} 💰</code>\n"
+            f"💵 Требуется всего: <code>{fmt_num(total_cost)} 💰</code> "
+            f"<i>({fmt_num(amount_per_user)} × {activations_count} чел.)</i>\n"
             f"💰 Ваш баланс: <code>{fmt_num(balance)} 💰</code>"
         )
 
-    # Списываем сразу всю сумму чека с создателя
+    # Атомарное списание общей суммы
     if not await db.deduct_bet_atomic(user_id, total_cost):
-        return await message.answer("❌ Ошибка при списании баланса. Попробуйте снова.")
+        return await safe_reply(message, "❌ Ошибка списания баланса. Попробуйте снова.")
 
     creator_name = user.get("custom_nick") or message.from_user.full_name
-    check_id = str(uuid.uuid4())[:8]
+    check_id = uuid.uuid4().hex[:8]
 
-    # Сохраняем чек
     active_checks[check_id] = {
         "creator_id": user_id,
         "creator_name": creator_name,
@@ -3495,12 +3491,12 @@ async def process_create_check_command(message: Message, args: List[str]):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Награда каждому: <b>+{fmt_num(amount_per_user)} 💰</b>\n"
         f"👥 Активаций: <b>0 / {activations_count}</b>\n"
+        f"💵 Общий фонд: <code>{fmt_num(total_cost)} 💰</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Жмите кнопку ниже, чтобы забрать свою долю!</i>"
     )
 
-    await message.answer(text, reply_markup=kb)
-
+    await safe_reply(message, text, reply_markup=kb)
 
 # Обработчик кнопки активации чека
 @dp.callback_query(lambda c: c.data and c.data.startswith("claim_check:"))
@@ -3529,7 +3525,7 @@ async def on_claim_check_click(callback: CallbackQuery):
     await callback.answer(f"🎉 Вы успешно забрали +{fmt_num(amount)} 💰!", show_alert=True)
 
     creator_mention = get_mention(check["creator_id"], check["creator_name"])
-
+    
     # Если чек полностью разобран
     if claimed_count >= total_count:
         del active_checks[check_id]
@@ -3557,11 +3553,15 @@ async def on_claim_check_click(callback: CallbackQuery):
             f"<i>Жмите кнопку ниже, чтобы забрать свою долю!</i>"
         )
         try:
-            await callback.message.edit_text(updated_text, reply_markup=get_check_kb(check_id))
+            await callback.message.edit_text(
+                updated_text, 
+                reply_markup=get_check_kb(check_id), 
+                parse_mode="HTML"
+            )
         except Exception:
             pass
-
-# ================= ВОРК И СПОНСОРКА =================
+    await callback.message.edit_text(updated_text, reply_markup=get_check_kb(check_id), parse_mode="HTML")
+# =======   1========== ВОРК И СПОНСОРКА =================
 async def process_sponsor_cmd(message: Message):
     user_id = message.from_user.id
     await db.register_user(user_id, message.from_user.full_name, message.from_user.username)
