@@ -3513,6 +3513,7 @@ async def process_create_check_command(message: Message, args: List[str]):
     await safe_reply(message, text, reply_markup=kb)
 
 # Обработчик кнопки активации чека
+# Обработчик кнопки активации чека
 @dp.callback_query(lambda c: c.data and c.data.startswith("claim_check:"))
 async def on_claim_check_click(callback: CallbackQuery):
     check_id = callback.data.split(":")[1]
@@ -3539,6 +3540,37 @@ async def on_claim_check_click(callback: CallbackQuery):
     await callback.answer(f"🎉 Вы успешно забрали +{fmt_num(amount)} 💰!", show_alert=True)
 
     creator_mention = get_mention(check["creator_id"], check["creator_name"])
+
+    # Если чек полностью разобран
+    if claimed_count >= total_count:
+        active_checks.pop(check_id, None)
+        final_text = (
+            f"🎁 <b>ЧЕК ПОЛНОСТЬЮ АКТИВИРОВАН!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Создатель: {creator_mention}\n"
+            f"💰 Получил каждый: <b>+{fmt_num(amount)} 💰</b>\n"
+            f"👥 Всего забрало: <b>{total_count} чел.</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏁 <i>Все награды успешно розданы!</i>"
+        )
+        try:
+            await callback.message.edit_text(final_text, reply_markup=None, parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        # Обновляем счётчик забранных активаций в сообщении
+        updated_text = (
+            f"🎁 <b>ЧЕК ОТ {creator_mention}!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Награда каждому: <b>+{fmt_num(amount)} 💰</b>\n"
+            f"👥 Активаций: <b>{claimed_count} / {total_count}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Жмите кнопку ниже, чтобы забрать свою долю!</i>"
+        )
+        try:
+            await callback.message.edit_text(updated_text, reply_markup=get_check_kb(check_id), parse_mode="HTML")
+        except Exception:
+            pass
     
     # Если чек полностью разобран
     if claimed_count >= total_count:
